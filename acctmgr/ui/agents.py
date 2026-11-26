@@ -930,12 +930,24 @@ class AgentsTab(QWidget):
         self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
 
     def _picking(self) -> bool:
-        """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있거나 그 칸이 선택돼 있음."""
+        """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있을 때만.
+        (칸에 커서만 남아 있는 것까지 고르는 중으로 보면, 연결한 뒤에도 목록이 안 바뀐 것처럼 보였음)"""
         for r in range(self.pend.rowCount()):
             c = self.pend.cellWidget(r, 4)
-            if isinstance(c, QComboBox) and (c.view().isVisible() or c.hasFocus()):
+            if isinstance(c, QComboBox) and c.view().isVisible():
                 return True
         return False
+
+    def _redraw_pending(self) -> None:
+        """연결/지우기를 한 뒤: 고르는 중 여부와 상관없이 연결 대기 목록을 바로 새로 그린다."""
+        self._pending_key = None
+        self.setFocus()
+        self._tick()
+
+    def _say(self, text: str) -> None:
+        w = self.window()
+        if hasattr(w, "statusBar"):
+            w.statusBar().showMessage(text, 8000)
 
     def _plan_suggestions(self, taken: set) -> None:
         """연결 대기 실행기마다 추천 컴퓨터를 정한다 (두 실행기에 같은 컴퓨터를 추천하지 않게)."""
@@ -974,15 +986,19 @@ class AgentsTab(QWidget):
                 self, "연결", "이 컴퓨터에는 이미 실행기가 있어요. 새 실행기로 바꿀까요?") != QMessageBox.Yes:
             return
         if run_safely(self, self.repo.link_agent, ag.user_id, pid):
+            self.pending_choice.pop(ag.user_id, None)
             try:
                 self.repo.sync_pc_creds()
             except RepoError:
                 pass
-            self._tick()
+            self._redraw_pending()
+            pc = next((p for p in self.pcs if p.id == pid), None)
+            self._say(f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요.")
 
     def _forget(self, ag: Agent) -> None:
         if QMessageBox.question(self, "지우기", f"'{ag.machine}' 실행기를 목록에서 지울까요?\n"
                                 "그 PC의 실행기가 다시 켜지면 또 나타나요.") != QMessageBox.Yes:
             return
         if run_safely(self, self.repo.forget_agent, ag.user_id):
-            self._tick()
+            self.pending_choice.pop(ag.user_id, None)
+            self._redraw_pending()
