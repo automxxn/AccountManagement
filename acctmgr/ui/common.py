@@ -24,6 +24,7 @@ THEMES = {
         "scroll": "#C9CDD4", "scroll_hover": "#A9AFB8", "alt_row": "#FAFBFC", "header": "#F7F8FA",
         "header_ink": "#4B5563", "selection": "#C9DAFB",
         "table_bg": "#F1F3F6", "row_line": "#CDD2DA", "col_line": "#E0E3E8", "group_line": "#8E97A5", "gap": "#FFFFFF",
+        "check_border": "#8E97A5",
         "badge": {"ban": ("#FDECEC", "#B42318"), "info": ("#EEEFF1", "#3D4450"),
                   "worker": ("#F3EEFE", "#6D28D9")},
         "status": {"사용가능": "#1A7F37", "사용중": "#1D4ED8", "탈퇴": "#B42318"},
@@ -40,6 +41,7 @@ THEMES = {
         "scroll": "#3A404A", "scroll_hover": "#4C535E", "alt_row": "#22252B", "header": "#23272E",
         "header_ink": "#B4BBC4", "selection": "#2C4A80",
         "table_bg": "#181B20", "row_line": "#3A404A", "col_line": "#272B32", "group_line": "#5E6878", "gap": "#0F1114",
+        "check_border": "#8B94A1",
         "badge": {"ban": ("#3A1F22", "#F87171"), "info": ("#2A2F37", "#C3C8CF"),
                   "worker": ("#2E2546", "#C4B5FD")},
         "status": {"사용가능": "#4ADE80", "사용중": "#7AA7FA", "탈퇴": "#F87171"},
@@ -72,9 +74,25 @@ def status_color(status: str) -> str:
     return THEMES[_state["theme"]]["status"].get(status, T("muted"))
 
 
+def _check_icon() -> str:
+    """체크 표시(흰색 ✓) 그림 파일 경로. 스타일시트는 파일 경로로만 그림을 받으므로 한 번 만들어 둔다."""
+    import os
+    from pathlib import Path
+    d = Path(os.environ.get("APPDATA") or str(Path.home())) / "AccountManagement" / "ui"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "check.svg"
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+           '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#FFFFFF" stroke-width="2.2" '
+           'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    if not f.exists() or f.read_text(encoding="utf-8") != svg:
+        f.write_text(svg, encoding="utf-8")
+    return str(f).replace("\\", "/")
+
+
 def build_style() -> str:
     c = THEMES[_state["theme"]]
     p = px
+    check = _check_icon()
     return f"""
 QWidget {{ font-family: "Malgun Gothic"; font-size: {p(13)}px; color: {c['ink']}; }}
 QMainWindow, QWidget#page, QDialog {{ background: {c['bg']}; }}
@@ -125,7 +143,18 @@ QLineEdit:disabled {{ background: {c['surface2']}; color: {c['faint']}; }}
 QComboBox::drop-down {{ border: none; width: {p(22)}px; }}
 QComboBox QAbstractItemView {{ border: 1px solid {c['line']}; background: {c['surface']}; color: {c['ink']};
     selection-background-color: {c['accent_soft']}; selection-color: {c['ink']}; }}
-QCheckBox {{ spacing: 6px; }}
+QCheckBox {{ spacing: {p(8)}px; }}
+QCheckBox::indicator {{ width: {p(16)}px; height: {p(16)}px; border: 2px solid {c['check_border']}; border-radius: 4px;
+    background: {c['surface']}; }}
+QCheckBox::indicator:hover {{ border-color: {c['accent']}; }}
+QCheckBox::indicator:checked {{ background: {c['accent']}; border-color: {c['accent']}; image: url({check}); }}
+QCheckBox::indicator:disabled {{ background: {c['surface2']}; border-color: {c['line']}; }}
+QCheckBox::indicator:checked:disabled {{ background: {c['disabled_accent']}; border-color: {c['disabled_accent']}; }}
+QCheckBox#checkButton {{ background: {c['surface']}; border: 1px solid {c['input_border']}; border-radius: 7px;
+    padding: {p(6)}px {p(12)}px; color: {c['ink']}; }}
+QCheckBox#checkButton:hover {{ background: {c['hover']}; }}
+QCheckBox#checkButton:checked {{ background: {c['accent_soft']}; border-color: {c['accent']}; color: {c['accent_text']};
+    font-weight: bold; }}
 
 QTableWidget {{ background: {c['table_bg']}; border: 1px solid {c['line']}; border-radius: 10px; gridline-color: {c['grid']};
     alternate-background-color: {c['table_bg']}; selection-background-color: {c['accent_soft']}; selection-color: {c['ink']};

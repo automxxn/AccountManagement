@@ -33,6 +33,7 @@ class CloudRepository:
         self.user_id: str | None = None
         self.me = Profile(display_name="", role="pending")
         self.cipher: Cipher | None = None
+        self.on_session = None  # 로그인 유지 토큰이 바뀔 때마다 불러줌 (자동 로그인 저장용)
 
     @property
     def actor(self) -> str:
@@ -96,11 +97,22 @@ class CloudRepository:
         self.access_token = j["access_token"]
         self.refresh_token = j.get("refresh_token")
         self.user_id = j.get("user", {}).get("id")
+        if self.on_session and self.refresh_token:
+            self.on_session(self.refresh_token)
 
     def sign_in(self, login: str, password: str) -> None:
         j = self._request("POST", "/auth/v1/token?grant_type=password",
                           json={"email": to_email(login), "password": password})
         self._take_session(j)
+        self.load_me()
+
+    def sign_in_with_token(self, refresh_token: str) -> None:
+        """저장해 둔 로그인 유지 토큰으로 로그인 (자동 로그인)."""
+        self.refresh_token = refresh_token
+        try:
+            self._refresh()
+        except RepoError:
+            raise RepoError("자동 로그인 정보가 만료됐어요. 다시 로그인하세요.")
         self.load_me()
 
     def sign_up(self, login: str, password: str, display_name: str) -> None:

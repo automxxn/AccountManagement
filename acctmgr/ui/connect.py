@@ -1,16 +1,16 @@
 """시작 흐름: 연결 방식 선택 → (클라우드) 로그인 → 팀 암호 풀기."""
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QMessageBox, QRadioButton,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QProgressBar, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from ..cloud import CloudRepository
 from ..crypto import protect_key, unprotect_key
 from ..db import Repository, RepoError
-from .common import muted
+from .common import T, button, muted, px
 
 SETTINGS = ("AccountManagement", "AccountManagement")
 OLD_SETTINGS = ("계정관리", "계정관리")  # 이름을 바꾸기 전 설정
@@ -75,40 +75,82 @@ class ConnectionDialog(QDialog):
         self.accept()
 
 
+def _token_key(url: str) -> str:
+    return "refresh_token/" + url
+
+
+def save_auto_login(url: str, refresh_token: str | None) -> None:
+    """자동 로그인이 켜져 있으면 로그인 유지 토큰을 이 PC의 Windows 계정으로 잠가서 저장한다."""
+    s = settings()
+    if refresh_token and s.value("auto_login", False, type=bool):
+        s.setValue(_token_key(url), protect_key(refresh_token.encode("utf-8")))
+
+
+def clear_auto_login(url: str) -> None:
+    s = settings()
+    s.setValue("auto_login", False)
+    s.remove(_token_key(url))
+
+
+def stored_token(url: str) -> str | None:
+    s = settings()
+    if not s.value("auto_login", False, type=bool):
+        return None
+    raw = s.value(_token_key(url), "")
+    data = unprotect_key(raw) if raw else None
+    return data.decode("utf-8") if data else None
+
+
 class LoginDialog(QDialog):
-    def __init__(self, repo: CloudRepository, parent=None):
+    def __init__(self, repo: CloudRepository, parent=None, message: str = ""):
         super().__init__(parent)
         self.repo = repo
         self.setWindowTitle("로그인")
-        self.resize(380, 260)
-        self.login = QLineEdit(settings().value("last_login", ""))
+        self.resize(px(420), px(280))
+        s = settings()
+        self.login = QLineEdit(s.value("last_login", ""))
         self.pw = QLineEdit()
         self.pw.setEchoMode(QLineEdit.Password)
-        self.signup = QCheckBox("처음 사용해요 (가입 요청)")
         self.name = QLineEdit()
         self.name.setPlaceholderText("변경 기록에 보일 이름")
         self.pw2 = QLineEdit()
         self.pw2.setEchoMode(QLineEdit.Password)
+        self.auto = QCheckBox("자동 로그인 (다음부터 이 PC에서는 바로 로그인)")
+        self.auto.setChecked(s.value("auto_login", True, type=bool))
         form = QFormLayout()
         form.addRow("아이디", self.login)
         form.addRow("비밀번호", self.pw)
-        form.addRow("", self.signup)
         self.name_label, self.pw2_label = QLabel("이름"), QLabel("비밀번호 확인")
         form.addRow(self.name_label, self.name)
         form.addRow(self.pw2_label, self.pw2)
+        form.addRow("", self.auto)
+
+        # 아래 버튼 줄: [연결 설정] ……… [☐ 가입 요청] [로그인] [종료]
+        self.signup = QCheckBox("가입 요청")
+        self.signup.setObjectName("checkButton")
+        self.signup.setCursor(Qt.PointingHandCursor)
+        self.signup.setToolTip("처음 사용하면 체크하고 이름과 비밀번호 확인을 입력하세요")
         self.signup.toggled.connect(self._toggle)
-        self._toggle(False)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.ok_btn = box.button(QDialogButtonBox.Ok)
-        self.ok_btn.setText("로그인")
-        box.button(QDialogButtonBox.Cancel).setText("종료")
-        box.accepted.connect(self._go)
-        box.rejected.connect(self.reject)
-        conn = box.addButton("연결 설정", QDialogButtonBox.ResetRole)
-        conn.clicked.connect(self._connection)
+        self.ok_btn = button("로그인", "primary", self._go)
+        self.ok_btn.setDefault(True)
+        btns = QHBoxLayout()
+        btns.addWidget(button("연결 설정", "", self._connection))
+        btns.addStretch(1)
+        btns.addWidget(self.signup)
+        btns.addWidget(self.ok_btn)
+        btns.addWidget(button("종료", "", self.reject))
+
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(20), px(16), px(20), px(16))
+        if message:
+            m = QLabel(message)
+            m.setWordWrap(True)
+            m.setStyleSheet(f"color:{T('danger')};")
+            lay.addWidget(m)
         lay.addLayout(form)
-        lay.addWidget(box)
+        lay.addStretch(1)
+        lay.addLayout(btns)
+        self._toggle(False)
         (self.pw if self.login.text() else self.login).setFocus()
 
     def _connection(self) -> None:
@@ -118,14 +160,17 @@ class LoginDialog(QDialog):
     def _toggle(self, on: bool) -> None:
         for w in (self.name, self.pw2, self.name_label, self.pw2_label):
             w.setVisible(on)
-        if hasattr(self, "ok_btn"):
-            self.ok_btn.setText("가입 요청" if on else "로그인")
+        self.ok_btn.setText("가입 요청 보내기" if on else "로그인")
 
     def _go(self) -> None:
         login, pw = self.login.text().strip(), self.pw.text()
         if not login or not pw:
             QMessageBox.warning(self, "확인 필요", "아이디와 비밀번호를 입력하세요.")
             return
+        s = settings()
+        s.setValue("auto_login", self.auto.isChecked())
+        if not self.auto.isChecked():
+            clear_auto_login(self.repo.url)
         try:
             if self.signup.isChecked():
                 if pw != self.pw2.text():
@@ -140,8 +185,62 @@ class LoginDialog(QDialog):
         except RepoError as e:
             QMessageBox.warning(self, "로그인 실패", str(e))
             return
-        settings().setValue("last_login", login)
+        s.setValue("last_login", login)
         self.accept()
+
+
+class AutoLoginDialog(QDialog):
+    """저장된 정보로 잠깐(1초) 뒤에 자동 로그인. 그 사이 '직접 로그인'을 누르면 멈춘다."""
+
+    WAIT_MS = 1000
+
+    def __init__(self, repo: CloudRepository, token: str, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.token = token
+        self.error = ""
+        self.setWindowTitle("자동 로그인")
+        self.resize(px(380), px(150))
+        who = settings().value("last_login", "") or "저장된 계정"
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(20), px(16), px(20), px(16))
+        self.msg = QLabel(f"<b>{who}</b> 계정으로 자동 로그인할게요…")
+        lay.addWidget(self.msg)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, self.WAIT_MS)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedHeight(px(6))
+        lay.addWidget(self.bar)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.cancel_btn = button("직접 로그인", "", self.reject, "자동 로그인을 멈추고 로그인 창을 열어요")
+        row.addWidget(self.cancel_btn)
+        lay.addLayout(row)
+        self._t = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(50)
+
+    def _tick(self) -> None:
+        self._t += 50
+        self.bar.setValue(min(self._t, self.WAIT_MS))
+        if self._t >= self.WAIT_MS:
+            self.timer.stop()
+            self.cancel_btn.setEnabled(False)
+            self.msg.setText("로그인 중…")
+            QApplication.processEvents()
+            try:
+                self.repo.sign_in_with_token(self.token)
+            except RepoError as e:
+                self.error = str(e)
+                self.reject()
+                return
+            self.accept()
+
+    def reject(self) -> None:
+        self.timer.stop()
+        super().reject()
 
 
 class PassphraseDialog(QDialog):
@@ -220,11 +319,25 @@ def start_repository():
     if not s.value("mode", ""):
         if not ConnectionDialog().exec():
             return None
+    message = ""
+    try_auto = True
     while True:
         if s.value("mode") != "cloud":
             return Repository()
         repo = CloudRepository(s.value("url"), s.value("anon_key"))
-        result = LoginDialog(repo).exec()
+        repo.on_session = lambda token, url=repo.url: save_auto_login(url, token)
+        token = stored_token(repo.url) if try_auto else None
+        try_auto = False
+        if token:
+            auto = AutoLoginDialog(repo, token)
+            if auto.exec():
+                break
+            if auto.error:
+                clear_auto_login(repo.url)
+                s.setValue("auto_login", True)  # 다시 로그인하면 또 저장되게
+                message = auto.error
+        result = LoginDialog(repo, message=message).exec()
+        message = ""
         if result == 2:
             continue
         if not result:

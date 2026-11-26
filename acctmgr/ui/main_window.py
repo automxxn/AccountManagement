@@ -17,7 +17,7 @@ from .accounts import AccountsTab
 from .common import (
     ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
 )
-from .connect import ConnectionDialog, settings
+from .connect import ConnectionDialog, clear_auto_login, settings
 from .update_ui import manual_check
 from .workers import WorkersTab
 from .workplace import WorkplaceTab
@@ -201,6 +201,8 @@ class MainWindow(QMainWindow):
         if not self.cloud:
             m.addAction("작업자 이름 바꾸기...", lambda: (self._ask_actor(), self._update_title()))
         m.addAction("연결 설정... (다시 시작 필요)", self._connection)
+        if self.cloud:
+            m.addAction("자동 로그인 끄기", self._auto_login_off)
         m.addSeparator()
         m.addAction(f"업데이트 확인... (지금 v{__version__})", self._check_update)
         m.addAction("오류 기록(로그) 폴더 열기", logsetup.open_log_folder)
@@ -265,6 +267,10 @@ class MainWindow(QMainWindow):
     def _check_update(self) -> None:
         if manual_check(self):
             QApplication.quit()
+
+    def _auto_login_off(self) -> None:
+        clear_auto_login(self.repo.url)
+        QMessageBox.information(self, "자동 로그인", "자동 로그인을 껐어요. 다음에 켤 때는 비밀번호를 입력해야 해요.")
 
     def _connection(self) -> None:
         if ConnectionDialog(self).exec():
