@@ -206,9 +206,7 @@ class CloudRepository:
             pcs[r["id"]] = PC(id=r["id"], no=r["no"], name=r["name"], remote_t=r["remote_t"],
                               anydesk_id=r["anydesk_id"], anydesk_pw=self._dec(r["anydesk_pw"]), vpn=r["vpn"],
                               ld_cloud=r["ld_cloud"], slot_count=r["slot_count"], note=r["note"],
-                              version=r["version"], worker_id=r["worker_id"],
-                delete_requested_at=(r.get("delete_requested_at") or "")[:16].replace("T", " "),
-                delete_requested_by=r.get("delete_requested_by"), slots=[None] * r["slot_count"])
+                              version=r["version"], worker_id=r["worker_id"], slots=[None] * r["slot_count"])
         for r in self._get("assignments", {"select": "pc_id,slot,account_id"}):
             p = pcs.get(r["pc_id"])
             if p and 1 <= r["slot"] <= len(p.slots):
@@ -225,6 +223,8 @@ class CloudRepository:
                 password=self._dec(r["password"]), tag=r["tag"], mr_ban=Ban(r["mr_banned"], r["mr_until"]),
                 pl_ban=Ban(r["pl_banned"], r["pl_until"]), withdrawn=r["withdrawn"], note=r["note"],
                 version=r["version"], worker_id=r["worker_id"],
+                delete_requested_at=(r.get("delete_requested_at") or "")[:16].replace("T", " "),
+                delete_requested_by=r.get("delete_requested_by"),
                 characters=[Character(c["game"], c["nickname"], c["level_job"], c["id"]) for c in chars])
         pcs = {r["id"]: r for r in self._get("pcs", {"select": "id,no,name"})}
         for r in self._get("assignments", {"select": "pc_id,slot,account_id"}):
