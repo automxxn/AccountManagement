@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import copy
+import html
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -463,19 +464,23 @@ class WorkplaceTab(QWidget):
                 blocked += 1
                 if not show_blocked:
                     continue
-            lines = [f"{a.owner or a.contact or '(명의자 없음)'}   [{a.provider}] {a.login_id}", char_line(a)]
-            if why:
-                lines.append(f"넣을 수 없음: {why}")
-            text = chr(10).join(lines)
-            it = QListWidgetItem(text)
+            # 보여줄 게임 줄: '메랜 가능' 필터면 메랜만, '플래닛 가능'이면 플래닛만, 그 외에는 둘 다
+            games = {2: ["메랜"], 3: ["플래닛"]}.get(ban_mode, list(GAMES))
+            it = QListWidgetItem()
             it.setData(Qt.UserRole, a.id)
+            card = self._pick_card(a, games, why)
             if why:
                 it.setFlags(Qt.NoItemFlags)  # 고를 수 없게
-                it.setForeground(QColor(T("faint")))
                 it.setToolTip(why)
             else:
                 n += 1
+            # 화면에 붙기 전이라 자동 크기가 작게 나오므로 줄 수로 높이를 직접 정한다
+            f = QFont(self.font())
+            f.setPixelSize(px(14))
+            lines = 1 + len(games) + (2 if why else 0)
+            it.setSizeHint(QSize(0, lines * QFontMetrics(f).lineSpacing() + (lines - 1) * px(2) + px(24)))
             self.pick_list.addItem(it)
+            self.pick_list.setItemWidget(it, card)
         msg = f"넣을 수 있는 계정 {n}개"
         if blocked:
             msg += f"  ·  명의자 규칙으로 제외 {blocked}개"
@@ -485,6 +490,45 @@ class WorkplaceTab(QWidget):
             it = QListWidgetItem("조건에 맞는 계정이 없어요")
             it.setFlags(Qt.NoItemFlags)
             self.pick_list.addItem(it)
+
+    def _pick_card(self, a: Account, games: list[str], why: str | None) -> QWidget:
+        """오른쪽 목록 한 칸.
+        1줄: 명의자 [유형] 아이디
+        2~3줄: ● 메랜: 대표캐릭터 / ● 플래닛: 대표캐릭터  (초록 = 그 게임에 쓸 수 있음, 빨강 = 정지)
+        """
+        faint = T("faint")
+        ink = faint if why else T("ink")
+        sub = faint if why else T("muted")
+        w = QWidget()
+        w.setAttribute(Qt.WA_TransparentForMouseEvents)  # 클릭은 목록 칸이 받는다
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(px(2), px(2), px(2), px(2))
+        lay.setSpacing(px(2))
+
+        def rich(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setTextFormat(Qt.RichText)
+            lab.setStyleSheet("background: transparent;")
+            return lab
+
+        owner = html.escape(a.owner or a.contact or "(명의자 없음)")
+        lay.addWidget(rich(f"<span style='color:{ink}; font-weight:bold'>{owner}</span>&nbsp;&nbsp;"
+                           f"<span style='color:{sub}'>[{html.escape(a.provider)}]</span>&nbsp;"
+                           f"<span style='color:{ink}'>{html.escape(a.login_id)}</span>"))
+        for g in games:
+            banned = (a.mr_ban if g == "메랜" else a.pl_ban).active()
+            dot = faint if why else (T("danger") if banned else T("success"))
+            m = a.main(g)
+            more = len(a.chars(g)) - 1
+            text = (m.text() + (f" 외 {more}" if more > 0 else "")) if m else "캐릭터 없음"
+            lay.addWidget(rich(f"<span style='color:{dot}; font-size:{px(14)}px'>●</span>&nbsp;"
+                               f"<span style='color:{sub}'>{g}:</span>&nbsp;"
+                               f"<span style='color:{ink}'>{html.escape(text)}</span>"))
+        if why:
+            reason = rich(f"<span style='color:{T('danger')}'>넣을 수 없음: {html.escape(why)}</span>")
+            reason.setWordWrap(True)
+            lay.addWidget(reason)
+        return w
 
     # ---------------------------------------------------------------- 동작
     def select_slot(self, pc_id: int, slot: int) -> None:
