@@ -601,13 +601,13 @@ begin
         insert into pcs (team_id, no, name, remote_t, anydesk_id, anydesk_pw, vpn, ld_cloud, slot_count, note)
         values (v_team, v_no, trim(coalesce(p ->> 'name', '')), trim(coalesce(p ->> 'remote_t', '')),
                 trim(coalesce(p ->> 'anydesk_id', '')), coalesce(p ->> 'anydesk_pw', ''), trim(coalesce(p ->> 'vpn', '')),
-                trim(coalesce(p ->> 'ld_cloud', '')), v_slots, coalesce(p ->> 'note', ''))
+                '', v_slots, coalesce(p ->> 'note', ''))
         returning id into v_id;
         perform _log('컴퓨터 추가', format('%s. %s', v_no, p ->> 'name'), v_team);
     else
         update pcs set no = v_no, name = trim(coalesce(p ->> 'name', '')), remote_t = trim(coalesce(p ->> 'remote_t', '')),
             anydesk_id = trim(coalesce(p ->> 'anydesk_id', '')), anydesk_pw = coalesce(p ->> 'anydesk_pw', ''),
-            vpn = trim(coalesce(p ->> 'vpn', '')), ld_cloud = trim(coalesce(p ->> 'ld_cloud', '')),
+            vpn = trim(coalesce(p ->> 'vpn', '')),   -- ld_cloud는 실행기가 정함
             slot_count = v_slots, note = coalesce(p ->> 'note', ''),
             version = version + 1, updated_at = now()
         where id = v_id;
@@ -1011,7 +1011,7 @@ begin
         insert into pcs (team_id, no, name, remote_t, anydesk_id, anydesk_pw, vpn, ld_cloud, slot_count, note)
         values (p_team, (pc ->> 'no')::integer, coalesce(pc ->> 'name', ''), coalesce(pc ->> 'remote_t', ''),
                 coalesce(pc ->> 'anydesk_id', ''), coalesce(pc ->> 'anydesk_pw', ''), coalesce(pc ->> 'vpn', ''),
-                coalesce(pc ->> 'ld_cloud', ''), coalesce((pc ->> 'slot_count')::integer, 2), coalesce(pc ->> 'note', ''));
+                '', coalesce((pc ->> 'slot_count')::integer, 2), coalesce(pc ->> 'note', ''));
     end loop;
 
     for l in select * from jsonb_array_elements(p -> 'links') loop
@@ -1079,6 +1079,17 @@ alter table public.pc_commands add constraint pc_commands_kind_check check (kind
                                         'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
                                         'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent'));
 
+-- LD 클라우드 표기 '이름 #ID' 나누기
+create or replace function public._cloud_id(c text) returns text
+language sql immutable as $$
+    select nullif(trim(split_part(coalesce(c, ''), '#', 2)), '')
+$$;
+
+create or replace function public._cloud_name(c text) returns text
+language sql immutable as $$
+    select trim(split_part(coalesce(c, ''), ' #', 1))
+$$;
+
 -- 이 실행기(로그인한 agent)가 연결된 컴퓨터
 create or replace function public._my_agent_pc() returns bigint
 language sql stable security definer set search_path = public as $$
@@ -1136,9 +1147,13 @@ end $$;
 create or replace function public.agent_sync(p_state jsonb, p_devices jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
-    v_ag  agents%rowtype;
-    v_pc  pcs%rowtype;
-    v_cmd pc_commands%rowtype;
+    v_ag      agents%rowtype;
+    v_pc      pcs%rowtype;
+    v_cmd     pc_commands%rowtype;
+    v_cloud   text;
+    v_cid     text;
+    v_cands   bigint[];
+    v_changed bigint;
 begin
     if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
     update agents set last_seen = now(), state = coalesce(p_state, state),
@@ -1146,7 +1161,34 @@ begin
                        then devices else p_devices end
     where user_id = auth.uid() returning * into v_ag;
     if not found then raise exception '먼저 등록해야 해요.'; end if;
+    v_cloud := v_ag.state -> 'cfg' ->> 'cloud';
+    v_cid := _cloud_id(v_cloud);
+    -- 자동 연결: 작업장 PC 조종에서 이 클라우드를 정해 둔 컴퓨터가 딱 하나 있고, 거기에 다른 실행기가 없고,
+    -- 같은 클라우드를 여는 다른 연결 대기 실행기도 없으면 그 컴퓨터에 연결한다
+    if v_ag.pc_id is null and v_cid is not null then
+        select array_agg(id) into v_cands from pcs where _cloud_id(agent_settings ->> 'cloud') = v_cid;
+        if cardinality(v_cands) = 1
+           and not exists (select 1 from agents where pc_id = v_cands[1])
+           and not exists (select 1 from agents a where a.pc_id is null and a.user_id <> v_ag.user_id
+                           and a.last_seen > now() - interval '10 minutes'
+                           and _cloud_id(a.state -> 'cfg' ->> 'cloud') = v_cid) then
+            update agents set pc_id = v_cands[1] where user_id = v_ag.user_id;
+            v_ag.pc_id := v_cands[1];
+            delete from pc_creds where pc_id = v_cands[1];
+            perform _log('실행기 자동 연결', v_ag.machine || ' → ' || _pc_no_label(v_cands[1]) || ' (' || _cloud_name(v_cloud) || ')',
+                         _pc_team(v_cands[1]));
+        end if;
+    end if;
     if v_ag.pc_id is null then return jsonb_build_object('pc_id', null); end if;
+    -- 작업장 LD클라우드 칸 = 이 실행기가 실제로 여는 클라우드 (바뀌면 기록을 남겨 다른 화면도 새로고침되게)
+    if _cloud_name(v_cloud) <> '' then
+        update pcs set ld_cloud = _cloud_name(v_cloud), updated_at = now()
+         where id = v_ag.pc_id and ld_cloud is distinct from _cloud_name(v_cloud)
+        returning id into v_changed;
+        if v_changed is not null then
+            perform _log('실행기 클라우드', _pc_no_label(v_ag.pc_id) || ': ' || _cloud_name(v_cloud), _pc_team(v_ag.pc_id));
+        end if;
+    end if;
     select * into v_pc from pcs where id = v_ag.pc_id;
     -- 대기 중인 명령 하나를 가져가며 '실행 중'으로 (중지 명령이 있으면 그것 먼저)
     select * into v_cmd from pc_commands
@@ -1199,10 +1241,12 @@ begin
     if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
     if p_pc is not null then delete from pc_creds where pc_id = p_pc; end if;
     update agents set pc_id = p_pc where user_id = p_agent;
-    -- 작업장 LD클라우드 칸이 비어 있으면 그 실행기가 여는 클라우드 이름으로 채운다 ('클라우드22번 #123' → '클라우드22번')
-    if p_pc is not null and coalesce(v_ag.state -> 'cfg' ->> 'cloud', '') <> '' then
-        update pcs set ld_cloud = trim(split_part(v_ag.state -> 'cfg' ->> 'cloud', ' #', 1)), updated_at = now()
-         where id = p_pc and trim(coalesce(ld_cloud, '')) = '';
+    -- 작업장 LD클라우드 칸은 실행기가 여는 클라우드만 보여준다: 떠나는 컴퓨터는 비우고, 새 컴퓨터는 그 실행기 값으로
+    if v_ag.pc_id is not null and v_ag.pc_id is distinct from p_pc then
+        update pcs set ld_cloud = '', updated_at = now() where id = v_ag.pc_id;
+    end if;
+    if p_pc is not null then
+        update pcs set ld_cloud = _cloud_name(v_ag.state -> 'cfg' ->> 'cloud'), updated_at = now() where id = p_pc;
     end if;
     perform _log(case when p_pc is null then '실행기 연결 끊기' else '실행기 연결' end,
                  v_ag.machine || coalesce(' → ' || _pc_no_label(p_pc), ''), coalesce(v_team, _pc_team(v_ag.pc_id)));
@@ -1270,6 +1314,17 @@ language sql stable security definer set search_path = public as $$
       from pc_creds where pc_id = _my_agent_pc() and my_role() = 'agent'
 $$;
 
+-- 한 번만: 작업장 LD클라우드 칸을 엑셀 값 대신 실행기가 여는 클라우드로 바꾼다
+do $$
+begin
+    if not exists (select 1 from public.app_settings where key = 'ld_cloud_from_agents') then
+        update public.pcs p set ld_cloud = coalesce((select public._cloud_name(a.state -> 'cfg' ->> 'cloud')
+                                                     from public.agents a where a.pc_id = p.id), '')
+         where true;
+        insert into public.app_settings (key, value) values ('ld_cloud_from_agents', '1');
+    end if;
+end $$;
+
 -- 실행기가 명령을 바로 알 수 있게 (Supabase Realtime). 시험용 DB처럼 없으면 건너뛴다
 do $$
 begin
@@ -1308,7 +1363,7 @@ grant execute on function
     public.register_key(text, text, text), public.grant_team_key(bigint, uuid, text, text),
     public.set_team_key(text, text), public.set_games(bigint, jsonb),
     public.last_change(bigint), public.import_data(bigint, jsonb),
-    public._my_agent_pc(), public._pc_team(bigint), public._can_control(bigint),
+    public._my_agent_pc(), public._pc_team(bigint), public._can_control(bigint), public._cloud_id(text), public._cloud_name(text),
     public.agent_register(text, text, text), public.agent_sync(jsonb, jsonb), public.agent_report(bigint, text, text, text),
     public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text),
     public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds()

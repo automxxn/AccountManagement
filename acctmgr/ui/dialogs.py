@@ -423,6 +423,8 @@ class PcDialog(QDialog):
         self.anydesk_pw = PasswordField(p.anydesk_pw)
         self.vpn = QLineEdit(p.vpn)
         self.ld = QLineEdit(p.ld_cloud)
+        self.ld.setReadOnly(True)  # 연결된 실행기가 여는 클라우드 (PC 조종에서 정함)
+        self.ld.setPlaceholderText("실행기가 연결되면 보여요 (PC 조종 → 컴퓨터별 클라우드 정하기)")
         self.slots = QSpinBox()
         self.slots.setRange(1, 20)
         self.slots.setValue(p.slot_count)

@@ -67,36 +67,16 @@ def _agent_cloud(ag: Agent) -> str:
     return ((ag.state.get("cfg") or {}).get("cloud") or "").split(" #")[0].strip()
 
 
-_NAME_NUM = re.compile(r"^(\D+?)(\d+)")   # '클라우드20(타문)' → ('클라우드', '20')
+def cloud_id(c: str | None) -> str:
+    """'클라우드22번 #5421329' → '5421329' (LD 기기 번호, 이름이 바뀌어도 그대로)."""
+    c = c or ""
+    return c.split("#", 1)[1].strip() if "#" in c else ""
 
 
-def cloud_match(ld_cloud: str, device: str) -> int:
-    """작업장 LD클라우드 칸 값과 LD CLOUD 기기 이름이 같은 클라우드인지 점수 (0 = 아님, 클수록 확실).
-
-    '클라우드1' ↔ '클라우드1번장시재' 처럼 한쪽이 다른 쪽을 품고 있으면 같은 것으로 보되,
-    바로 뒤(또는 앞)에 숫자가 붙으면 다른 번호이므로 아님 ('클라우드1' ↔ '클라우드10').
-    """
-    a = "".join((ld_cloud or "").split()).lower()
-    b = "".join((device or "").split()).lower()
-    if not a or not b:
-        return 0
-    if a == b:
-        return 500 + len(a)
-    # '클라우드20(타문)' ↔ '클라우드20번', '클라우드13메랜(타문)' ↔ '클라우드13번': 앞 글자가 같으면 번호로 판단
-    ma, mb = _NAME_NUM.match(a), _NAME_NUM.match(b)
-    if ma and mb and ma.group(1) and ma.group(1) == mb.group(1):
-        same = int(ma.group(2)) == int(mb.group(2))
-        return 400 + len(ma.group(0)) if same else 0
-    short, long_ = (a, b) if len(a) < len(b) else (b, a)
-    start = long_.find(short)
-    while start >= 0:
-        end = start + len(short)
-        before = long_[start - 1] if start > 0 else ""
-        after = long_[end] if end < len(long_) else ""
-        if not before.isdigit() and not after.isdigit():
-            return len(short)
-        start = long_.find(short, start + 1)
-    return 0
+def cloud_sort_key(c: str):
+    """'클라우드2 …' < '클라우드10 …' 처럼 숫자 순서."""
+    m = re.match(r"^(\D*)(\d+)", c or "")
+    return (m.group(1), int(m.group(2)), c) if m else (c or "", 0, c or "")
 
 
 def _item(text: str, center: bool = False) -> QTableWidgetItem:
@@ -115,7 +95,7 @@ class AgentSettingsDialog(QDialog):
     """
 
     def __init__(self, repo, pc, agent: Agent | None, parent=None, bulk: list | None = None,
-                 all_pcs: list | None = None, linked: set | None = None):
+                 all_pcs: list | None = None, linked: set | None = None, devices: list | None = None):
         super().__init__(parent)
         self.repo, self.pc, self.agent = repo, pc, agent
         self.linked = linked or set()
@@ -127,7 +107,7 @@ class AgentSettingsDialog(QDialog):
         cur.update(pc.agent_settings or {})                              # 여기서 정한 값이 우선
         self.cloud = QComboBox()
         self.cloud.setEditable(True)
-        items = list(agent.devices) if agent else []
+        items = sorted(set(devices or []) | set(agent.devices if agent else []), key=cloud_sort_key)
         if cur.get("cloud") and cur["cloud"] not in items:
             items.insert(0, cur["cloud"])
         self.cloud.addItems(items)
@@ -147,8 +127,9 @@ class AgentSettingsDialog(QDialog):
             crow.addWidget(self.cloud, 1)
             crow.addWidget(self._cmd_btn("목록 다시 읽기", "reload_devices", "그 PC의 실행기가 LD CLOUD 기기 목록을 다시 읽어요"))
             form.addRow("열 클라우드", crow)
-            if pc.ld_cloud:
-                form.addRow("", muted(f"작업장의 LD클라우드 칸: {pc.ld_cloud}"))
+            opens = ((agent.state.get("cfg") or {}).get("cloud") if agent else "") or ""
+            form.addRow("", muted(f"실행기가 지금 여는 클라우드: {opens.split(' #')[0] or '(아직 없음)'}  "
+                                  "— 작업장 LD클라우드 칸에는 이 값이 보여요"))
         wrow = QHBoxLayout()
         wrow.addWidget(self.wait)
         wrow.addWidget(muted("재시작한 뒤 다시 열 때까지 기다리는 시간"))
@@ -342,6 +323,101 @@ class AgentSettingsDialog(QDialog):
             self.accept()
 
 
+class CloudAssignDialog(QDialog):
+    """컴퓨터마다 LD 클라우드를 목록에서 고른다 (예전 실행기 설정의 '열 클라우드'처럼).
+    정해 두면 그 클라우드를 여는 실행기가 켜질 때 그 컴퓨터에 자동으로 연결되고, 연결된 실행기는 그 클라우드를 연다."""
+
+    NONE = "(정하지 않음)"
+
+    def __init__(self, repo, pcs: list, agents: dict, devices: list, parent=None):
+        super().__init__(parent)
+        self.repo, self.pcs = repo, pcs
+        self.setWindowTitle("컴퓨터별 클라우드 정하기")
+        self.resize(px(820), px(720))
+        hint = QLabel("컴퓨터마다 LD 클라우드를 고르세요. 그 클라우드를 여는 실행기가 켜지면 자동으로 그 컴퓨터에 연결되고,\n"
+                      "이미 연결된 실행기는 여기서 고른 클라우드를 열게 바뀌어요. 같은 클라우드를 두 컴퓨터에 고를 수는 없어요.")
+        hint.setWordWrap(True)
+        hint.setObjectName("hintBox")
+        self.table = QTableWidget(len(pcs), 4)
+        self.table.setHorizontalHeaderLabels(["번호", "컴퓨터", "실행기가 지금 여는 클라우드", "정할 클라우드"])
+        self.table.verticalHeader().setVisible(False)
+        style_table(self.table)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setDefaultSectionSize(px(40))
+        self.combos = {}
+        self.before = {}
+        for r, pc in enumerate(pcs):
+            self.table.setItem(r, 0, _item(str(pc.no), True))
+            self.table.setItem(r, 1, _item(pc.name))
+            ag = agents.get(pc.id)
+            now = ((ag.state.get("cfg") or {}).get("cloud") or "") if ag else ""
+            it = _item(now.split(" #")[0] if now else ("(실행기 없음)" if ag is None else "(정해지지 않음)"))
+            if not now:
+                it.setForeground(QColor(T("muted")))
+            self.table.setItem(r, 2, it)
+            cur = (pc.agent_settings or {}).get("cloud") or now
+            c = QComboBox()
+            c.addItem(self.NONE, "")
+            items = list(devices)
+            if cur and cur not in items:
+                items.append(cur)
+            for d in sorted(items, key=cloud_sort_key):
+                c.addItem(d, d)
+            c.setCurrentIndex(max(c.findData(cur), 0) if cur else 0)
+            wheel_only_when_focused(c)
+            self.combos[pc.id] = c
+            self.before[pc.id] = cur or ""
+            box = QWidget()
+            bl = QHBoxLayout(box)
+            bl.setContentsMargins(4, 2, 4, 2)
+            bl.addWidget(c)
+            self.table.setCellWidget(r, 3, box)
+        for col, w in enumerate([60, 160, 240]):
+            self.table.setColumnWidth(col, px(w))
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btns.button(QDialogButtonBox.Save).setText("저장")
+        btns.button(QDialogButtonBox.Cancel).setText("취소")
+        btns.accepted.connect(self._save)
+        btns.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.addWidget(hint)
+        lay.addWidget(self.table, 1)
+        lay.addWidget(btns)
+
+    def value(self) -> dict:
+        return {pid: c.currentData() or "" for pid, c in self.combos.items()}
+
+    def _save(self) -> None:
+        v = self.value()
+        used = {}
+        for pc in self.pcs:
+            cid = cloud_id(v[pc.id])
+            if cid:
+                if cid in used:
+                    other = used[cid]
+                    QMessageBox.warning(self, "같은 클라우드", f"{v[pc.id].split(' #')[0]} 을(를) {other.no}번과 {pc.no}번에 같이 골랐어요.\n"
+                                        "한 컴퓨터에만 고르세요.")
+                    return
+                used[cid] = pc
+        changed = [pc for pc in self.pcs if v[pc.id] != self.before[pc.id]]
+        errors = []
+        for pc in changed:
+            s = dict(pc.agent_settings or {})
+            if v[pc.id]:
+                s["cloud"] = v[pc.id]
+            else:
+                s.pop("cloud", None)
+            try:
+                self.repo.set_agent_settings(pc.id, s)
+            except RepoError as e:
+                errors.append(f"{pc.no}. {pc.name}: {e}")
+        if errors:
+            QMessageBox.warning(self, "일부 못 저장함", "\n".join(errors[:15]))
+        self.accept()
+
+
 class AgentsTab(QWidget):
     def __init__(self, repo):
         super().__init__()
@@ -386,6 +462,8 @@ class AgentsTab(QWidget):
         bar2.addSpacing(px(16))
         bar2.addWidget(button("선택한 컴퓨터에 같은 설정", "", self._bulk_settings,
                               "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
+        bar2.addWidget(button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
+                              "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요"))
         bar2.addStretch(1)
 
         self.table = QTableWidget(0, len(COLS))
@@ -623,6 +701,21 @@ class AgentsTab(QWidget):
         if errors:
             QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
 
+    def _all_devices(self) -> list:
+        devs = set()
+        for a in list(self.agents.values()) + list(self.pending):
+            devs.update(d for d in a.devices if d and not d.startswith("("))
+        return sorted(devs, key=cloud_sort_key)
+
+    def _clouds(self) -> None:
+        devs = self._all_devices()
+        if not devs:
+            QMessageBox.information(self, "클라우드 정하기", "아직 LD 클라우드 목록이 없어요. 실행기가 하나라도 켜지면 목록이 올라와요.")
+            return
+        dlg = CloudAssignDialog(self.repo, self.pcs, self.agents, devs, self)
+        if dlg.exec():
+            self.refresh()
+
     def _bulk_settings(self) -> None:
         targets = [p for p in self.pcs if p.id in self.checked]
         if len(targets) < 1:
@@ -634,7 +727,8 @@ class AgentsTab(QWidget):
             self.refresh()
 
     def _settings(self, pc) -> None:
-        dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self, all_pcs=self.pcs, linked=set(self.agents))
+        dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self, all_pcs=self.pcs, linked=set(self.agents),
+                                  devices=self._all_devices())
         if dlg.exec():
             self.refresh()
 
@@ -691,7 +785,8 @@ class AgentsTab(QWidget):
             self.pend.setItem(r, 1, _item(ag.version))
             opens = _agent_cloud(ag)
             oc = _item(opens or "(정해지지 않음)")
-            oc.setToolTip("그 PC 실행기에 저장돼 있는 '열 클라우드'예요. 작업장의 LD클라우드 칸과 같은 번호인 컴퓨터를 추천해요.")
+            oc.setToolTip("그 PC 실행기가 여는 클라우드예요. [컴퓨터별 클라우드 정하기]에서 이 클라우드를 정해 둔 컴퓨터가 있으면 "
+                          "자동으로 연결돼요.")
             if not opens:
                 oc.setForeground(QColor(T("muted")))
             self.pend.setItem(r, 2, oc)
@@ -699,7 +794,8 @@ class AgentsTab(QWidget):
             combo = QComboBox()
             combo.addItem("컴퓨터 고르기...", None)
             for p in self.pcs:
-                combo.addItem(f"{p.no}. {p.name}" + (f"  · {p.ld_cloud}" if p.ld_cloud else "")
+                chosen_cloud = ((p.agent_settings or {}).get("cloud") or "").split(" #")[0]
+                combo.addItem(f"{p.no}. {p.name}" + (f"  · {chosen_cloud}" if chosen_cloud else "")
                               + ("  (실행기 있음)" if p.id in taken else ""), p.id)
             wheel_only_when_focused(combo)  # 지나가다 휠을 굴려도 바뀌지 않게
             chosen = self.pending_choice.get(ag.user_id)
@@ -728,18 +824,14 @@ class AgentsTab(QWidget):
 
     def _guess_index(self, ag: Agent, combo: QComboBox, taken: set) -> int:
         """그 PC 실행기가 지금 여는 클라우드(또는 PC 이름)와 맞는 컴퓨터. 없으면 0(고르기)."""
-        cloud = _agent_cloud(ag)
-        best, best_score = 0, 0
+        cid = cloud_id((ag.state.get("cfg") or {}).get("cloud"))
+        if not cid:
+            return 0
         for i in range(1, combo.count()):
             p = next((x for x in self.pcs if x.id == combo.itemData(i)), None)
-            if p is None or p.id in taken:
-                continue
-            score = max([cloud_match(part, cloud) for part in (p.ld_cloud or "").split("/")] + [0])
-            if p.name and p.name.strip() and p.name.strip() == ag.machine.strip():
-                score = max(score, 1000)
-            if score > best_score:
-                best, best_score = i, score
-        return best
+            if p is not None and p.id not in taken and cloud_id((p.agent_settings or {}).get("cloud")) == cid:
+                return i
+        return 0
 
     def _reguess(self, ag: Agent, combo: QComboBox) -> None:
         self.pending_choice.pop(ag.user_id, None)

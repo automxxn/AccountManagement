@@ -24,7 +24,8 @@ PC_FILTERS = ["모든 컴퓨터", "빈 자리가 있는 컴퓨터", "정지 계�
 MIN_SLOTS = 2  # 컴퓨터마다 기본 자리 수 (이 밑으로는 줄일 수 없음)
 PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "AnyDesk 암호", "자리"]
 PC_INFO_COLS = range(0, 5)  # 컴퓨터 정보 칸 (자리 줄끼리 세로로 합침)
-EDIT_COLS = {1: "name", 2: "ld_cloud", 3: "anydesk_id", 4: "anydesk_pw"}  # 더블클릭으로 바로 수정, Ctrl+C/V
+# 더블클릭으로 바로 수정, Ctrl+C/V. LD클라우드(2)는 연결된 실행기가 실제로 여는 클라우드라 보기만 한다 (PC 조종에서 정함)
+EDIT_COLS = {1: "name", 3: "anydesk_id", 4: "anydesk_pw"}
 REAL_ROLE = Qt.UserRole + 2         # 가려진 칸(암호)의 실제 값
 GAP_ROLE = Qt.UserRole + 3          # 컴퓨터 사이 간격 줄
 GROUP_START_ROLE = Qt.UserRole + 4  # 컴퓨터 칸의 첫 줄 (위쪽 테두리)
