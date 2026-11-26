@@ -1,10 +1,10 @@
 """공통 디자인: 테마(라이트/다크), 화면 배율, 스타일시트, 작은 부품들."""
 from __future__ import annotations
 
-from PySide6.QtCore import Property, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, QSize, Qt
+from PySide6.QtCore import Property, QEasingCurve, QEvent, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyle,
+    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QLayout, QMessageBox, QPushButton, QStyle,
     QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget,
 )
 
@@ -588,3 +588,79 @@ def run_safely(parent: QWidget, fn, *args) -> bool:
     except RepoError as e:
         QMessageBox.warning(parent, "확인 필요", str(e))
         return False
+
+
+class FlowLayout(QLayout):
+    """버튼 줄: 자리가 모자라면 다음 줄로 넘어간다 (창을 좁혀도 버튼이 잘리지 않게)."""
+
+    def __init__(self, parent=None, spacing: int = 6):
+        super().__init__(parent)
+        self._items: list = []
+        self._sp = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        return self._place(QRect(0, 0, w, 0), move=False)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._place(rect, move=True)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _place(self, rect, move: bool) -> int:
+        m = self.contentsMargins()
+        r = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x, y, line_h = r.x(), r.y(), 0
+        for it in self._items:
+            if it.widget() is not None and it.widget().isHidden():
+                continue
+            hint = it.sizeHint()
+            if x + hint.width() > r.right() + 1 and line_h > 0:
+                x = r.x()
+                y += line_h + self._sp
+                line_h = 0
+            if move:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + self._sp
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+def group(*widgets, spacing: int = 6) -> QWidget:
+    """여러 위젯을 한 덩어리로 (줄바꿈될 때 같이 다님). 문자열은 흐린 글자로."""
+    w = QWidget()
+    h = QHBoxLayout(w)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(spacing)
+    for x in widgets:
+        if x is None:
+            continue
+        h.addWidget(muted(x) if isinstance(x, str) else x)
+    return w

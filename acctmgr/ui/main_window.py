@@ -78,7 +78,10 @@ class MainWindow(QMainWindow):
         if not self.cloud:
             repo.actor = settings().value("actor", "") or self._ask_actor(first=True)
         self._update_title()
-        self.resize(1480, 900)
+        # 기본 창 크기 1280×720 (화면이 더 작으면 화면 안에 들어가게)
+        scr = QApplication.primaryScreen()
+        avail = scr.availableGeometry() if scr else None
+        self.resize(min(1280, avail.width()) if avail else 1280, min(720, avail.height()) if avail else 720)
 
         # 게임 종류 불러오기 (계정 표의 게임별 열이 여기에 맞춰 만들어짐)
         self._load_games()

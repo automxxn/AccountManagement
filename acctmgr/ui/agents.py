@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (
 from ..db import RepoError
 from ..models import AGENT_KINDS, COMMAND_STATUS, GAMES, Agent
 from .common import (
-    T, button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused, zoom_rows,
+    T, FlowLayout, button, fit_columns, group, muted, page_header, px, run_safely, style_table,
+    wheel_only_when_focused, zoom_rows,
 )
 from .sheet import SheetNav
 
@@ -611,52 +612,50 @@ class AgentsTab(QWidget):
         hint.setWordWrap(True)
         hint.setObjectName("hintBox")
 
-        bar = QHBoxLayout()
+        # 버튼 줄: 창이 좁으면 덩어리 단위로 다음 줄로 넘어감 (잘리지 않게)
+        bar = FlowLayout(spacing=px(8))
         self.all_box = QCheckBox("전체 선택")
         self.all_box.toggled.connect(self._check_all)
-        bar.addWidget(self.all_box)
-        bar.addSpacing(12)
         self.sel_label = muted("선택한 컴퓨터 0대에:")
-        bar.addWidget(self.sel_label)
-        for kind in ("start", "restart", "close", "login_a", "login_b"):
-            bar.addWidget(button(AGENT_KINDS[kind], "primary" if kind.startswith("login") else "",
-                                 lambda _=False, k=kind: self._send_checked(k)))
-        bar.addWidget(button("중지", "danger", lambda: self._send_checked("stop"), "하던 작업을 멈추고 기다리는 명령을 취소해요"))
-        bar.addStretch(1)
-        bar2 = QHBoxLayout()
-        bar2.addSpacing(px(4))
-        bar2.addWidget(muted("다른 프로그램:"))
+        bar.addWidget(group(self.all_box, self.sel_label, spacing=px(12)))
+        bar.addWidget(group(*[button(AGENT_KINDS[kind], "primary" if kind.startswith("login") else "",
+                                     lambda _=False, k=kind: self._send_checked(k))
+                              for kind in ("start", "restart", "close", "login_a", "login_b")],
+                            button("중지", "danger", lambda: self._send_checked("stop"),
+                                   "하던 작업을 멈추고 기다리는 명령을 취소해요")))
+        bar2 = FlowLayout(spacing=px(8))
+        amp = []
         for kind in ("amp_run", "amp_stop"):
             b = button(AGENT_KINDS[kind], "", None, "어느 게임의 AMP인지 골라요 (실행기 [설정]에서 게임별 AMP를 정해 둬야 해요)")
             m = QMenu(b)
             m.aboutToShow.connect(lambda k=kind, menu=m: self._fill_amp_menu(k, menu))   # 팀마다 게임이 달라서 열 때마다 채움
             b.setMenu(m)
-            bar2.addWidget(b)
-        for kind in ("map_run", "map_stop"):
-            bar2.addWidget(button(AGENT_KINDS[kind], "", lambda _=False, k=kind: self._send_checked(k)))
-        bar2.addSpacing(px(16))
-        bar2.addWidget(muted("실행기:"))
-        bar2.addWidget(button("실행기 다시 켜기", "", lambda: self._send_checked("restart_agent"),
-                              "실행기를 껐다가 다시 켜요. 새 버전이 있으면 이때 업데이트돼요"))
+            amp.append(b)
+        bar2.addWidget(group("다른 프로그램:", *amp,
+                             *[button(AGENT_KINDS[kind], "", lambda _=False, k=kind: self._send_checked(k))
+                               for kind in ("map_run", "map_stop")]))
         wb = button("실행기 창", "", None, "체크한 컴퓨터의 실행기 창을 화면에 띄우거나 트레이로 보내요 (그 PC에 들어가지 않아도 돼요)")
         wm = QMenu(wb)
         wm.addAction("창 열기 (화면에 띄우기)", lambda: self._send_checked("window_show"))
         wm.addAction("트레이로 보내기 (창 숨기기)", lambda: self._send_checked("window_hide"))
         wb.setMenu(wm)
-        bar2.addWidget(wb)
-        bar2.addSpacing(px(16))
-        bar2.addWidget(button("선택한 컴퓨터에 같은 설정", "", self._bulk_settings,
-                              "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
-        bar2.addWidget(button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
-                              "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요"))
+        bar2.addWidget(group("실행기:", button("실행기 다시 켜기", "", lambda: self._send_checked("restart_agent"),
+                                              "실행기를 껐다가 다시 켜요. 새 버전이 있으면 이때 업데이트돼요"), wb))
+        bar2.addWidget(group(
+            button("선택한 컴퓨터에 같은 설정", "", self._bulk_settings,
+                   "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"),
+            button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
+                   "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요")))
+        manage = []
         if repo.me.can("can_link_agent"):
-            bar2.addWidget(button("선택한 컴퓨터 MAC 고정", "", self._fix_mac_checked,
-                                  "체크한 컴퓨터에 지금 연결된 실행기 PC의 MAC을 고정해요. 그 뒤로 그 PC의 실행기는 "
-                                  "다시 깔아도 항상 그 컴퓨터로 연결되고, 다른 PC 실행기는 그 컴퓨터로 자동 연결되지 않아요"))
+            manage.append(button("선택한 컴퓨터 MAC 고정", "", self._fix_mac_checked,
+                                 "체크한 컴퓨터에 지금 연결된 실행기 PC의 MAC을 고정해요. 그 뒤로 그 PC의 실행기는 "
+                                 "다시 깔아도 항상 그 컴퓨터로 연결되고, 다른 PC 실행기는 그 컴퓨터로 자동 연결되지 않아요"))
         if repo.me.is_admin or (repo.me.can("can_link_agent") and repo.me.can("can_control_pc")):
-            bar2.addWidget(button("선택한 컴퓨터 실행기 초기화", "danger", self._reset_checked,
-                                  "체크한 컴퓨터의 정한 클라우드를 지우고 실행기 연결을 끊어요. 실행기는 연결 대기로 돌아가요"))
-        bar2.addStretch(1)
+            manage.append(button("선택한 컴퓨터 실행기 초기화", "danger", self._reset_checked,
+                                 "체크한 컴퓨터의 정한 클라우드를 지우고 실행기 연결을 끊어요. 실행기는 연결 대기로 돌아가요"))
+        if manage:
+            bar2.addWidget(group(*manage))
 
         self.table = QTableWidget(0, len(COLS))
         self.table.setHorizontalHeaderLabels(COLS)
@@ -698,11 +697,9 @@ class AgentsTab(QWidget):
         self.pending_box = QWidget()
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
-        ph = QHBoxLayout()
+        ph = FlowLayout(spacing=px(10))
         self.pend_title = QLabel("<b>연결 대기 실행기</b>")
-        ph.addWidget(self.pend_title)
-        ph.addWidget(QLabel("— 어느 컴퓨터인지 골라 [연결]을 누르면 그 PC의 MAC이 그 컴퓨터에 고정돼요."))
-        ph.addStretch(1)
+        ph.addWidget(group(self.pend_title, QLabel("— 어느 컴퓨터인지 골라 [연결]을 누르면 그 PC의 MAC이 그 컴퓨터에 고정돼요.")))
         self.update_old_btn = button("예전 실행기 모두 업데이트", "primary", self._update_old,
                                      "MAC 모름으로 나오는(예전 버전) 연결 대기 실행기를 다시 켜서 새 버전으로 바꿔요. "
                                      "새 버전이 되면 MAC이 보여요")
@@ -758,7 +755,7 @@ class AgentsTab(QWidget):
         page = QScrollArea()
         page.setWidgetResizable(True)
         page.setWidget(content)
-        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)   # 버튼 줄은 줄바꿈되므로 보통은 안 생김
         self.page_scroll = page
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -777,8 +774,6 @@ class AgentsTab(QWidget):
         lay.addWidget(split, 1)
         lay.addWidget(self.pending_box)
 
-        # 가로는 스크롤하지 않음: 버튼 줄이 잘리지 않게 이 화면의 최소 폭을 예전처럼 창에 그대로 적용
-        page.setMinimumWidth(content.minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width() + 4)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)

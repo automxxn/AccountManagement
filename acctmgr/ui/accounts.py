@@ -14,7 +14,7 @@ from ..db import Repository
 from ..models import (
     DEFAULT_GAMES, GAMES, set_games, STATUS_AUTH, STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login,
 )
-from .common import button, copy_text, muted, page_header, px, run_safely, style_table
+from .common import FlowLayout, button, copy_text, group, muted, page_header, px, run_safely, style_table
 from .dialogs import AccountDialog, CharacterDialog
 from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells, rebuild_columns
 
@@ -118,15 +118,14 @@ class AccountsTab(QWidget):
         self.filters: list[str] = []
         frow = QHBoxLayout()
         frow.setSpacing(6)
-        self.chip_row = QHBoxLayout()
-        self.chip_row.setSpacing(6)
-        frow.addLayout(self.chip_row)
+        chips = QWidget()
+        self.chip_row = FlowLayout(chips, spacing=6)   # 필터가 많으면 다음 줄로 (창을 좁혀도 잘리지 않게)
+        frow.addWidget(chips, 1)
         self._build_filters()
-        frow.addStretch(1)
         self.search = QLineEdit()
         self.search.setPlaceholderText("명의자, 아이디, 닉네임, 비고로 찾기")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(300)
+        self.search.setMinimumWidth(px(220))
         self.search.textChanged.connect(self._render)
         frow.addWidget(self.search)
 
@@ -154,31 +153,26 @@ class AccountsTab(QWidget):
             self.table.viewport().setCursor(Qt.PointingHandCursor if c in CHAR_COLS else Qt.ArrowCursor))
         self.nav = SheetNav(self.table, "table_zoom", self._render)  # Ctrl+휠 = 표 크기, 휠 누르고 끌기 = 이동
 
-        brow = QHBoxLayout()
-        brow.setSpacing(6)
+        # 아래 줄: 창이 좁으면 [표시 개수·표 크기] 덩어리와 버튼 덩어리가 두 줄로 나뉨 (잘리지 않게)
+        brow = FlowLayout(spacing=px(10))
         self.count_label = muted()
-        brow.addWidget(self.count_label)
-        brow.addSpacing(10)
         self.tzoom_btn = button("", "ghost", lambda: self.nav.set(1.0), "누르면 100%로")
-        brow.addWidget(self.tzoom_btn)
-        brow.addStretch(1)
+        brow.addWidget(group(self.count_label, self.tzoom_btn, spacing=10))
         self.worker_names: dict = {}
         self.show_worker = False  # 담당 근무자 개념은 없앰 (근무자 관리의 보기 권한으로 대신)
-        brow.addWidget(button("아이디 복사", "", lambda: self._copy("id")))
-        brow.addWidget(button("비번 복사", "", lambda: self._copy("pw")))
         self.pw_btn = button("비번 보기")
         self.pw_btn.setCheckable(True)
         self.pw_btn.toggled.connect(self._toggle_pw)
-        brow.addWidget(self.pw_btn)
-        brow.addSpacing(12)
-        brow.addWidget(button("수정" if me.can("can_edit_account") else "정보 보기", "", self._edit))
+        brow.addWidget(group(button("아이디 복사", "", lambda: self._copy("id")),
+                             button("비번 복사", "", lambda: self._copy("pw")), self.pw_btn))
+        edit = [button("수정" if me.can("can_edit_account") else "정보 보기", "", self._edit)]
         if me.can("can_delete_account"):
-            brow.addWidget(button("삭제" if me.is_admin else "삭제 요청", "danger", self._delete))
+            edit.append(button("삭제" if me.is_admin else "삭제 요청", "danger", self._delete))
         if me.is_admin and repo.is_cloud:
             self.approve_btn = button("삭제 승인", "danger", self._approve, "근무자가 요청한 삭제를 확정해요 (되돌릴 수 없음)")
             self.reject_btn = button("삭제 거절", "", self._reject, "요청을 취소해서 근무자 화면에 다시 보이게 해요")
-            brow.addWidget(self.approve_btn)
-            brow.addWidget(self.reject_btn)
+            edit += [self.approve_btn, self.reject_btn]
+        brow.addWidget(group(*edit))
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
