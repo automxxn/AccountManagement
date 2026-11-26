@@ -1,7 +1,7 @@
 """공통 디자인: 테마(라이트/다크), 화면 배율, 스타일시트, 작은 부품들."""
 from __future__ import annotations
 
-from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt
+from PySide6.QtCore import Property, QEasingCurve, QEvent, QObject, QPropertyAnimation, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyle,
@@ -468,6 +468,25 @@ def app_icon():
 
 def copy_text(text: str) -> None:
     QApplication.clipboard().setText(text)
+
+
+class _WheelGuard(QObject):
+    """마우스가 지나가다 휠을 굴려도 값이 바뀌지 않게: 칸을 눌러서 선택(포커스)했을 때만 휠이 먹힌다."""
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QEvent.Wheel and not obj.hasFocus():
+            ev.ignore()
+            return True
+        return False
+
+
+_wheel_guard = _WheelGuard()
+
+
+def wheel_only_when_focused(*widgets) -> None:
+    for w in widgets:
+        w.setFocusPolicy(Qt.StrongFocus)
+        w.installEventFilter(_wheel_guard)
 
 
 def run_safely(parent: QWidget, fn, *args) -> bool:

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from ..cloud import LOGIN_DOMAIN
 from ..db import RepoError
 from ..models import PERMS, ROLES, Profile
-from .common import button, muted, page_header, px, run_safely, style_table
+from .common import button, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
 
 ASSIGN_COL_LABEL = "팀 배정"
 COLS = ["이름", "아이디", "역할", "팀"] + [label for _, label in PERMS] + [ASSIGN_COL_LABEL, ""]
@@ -179,6 +179,7 @@ class WorkersTab(QWidget):
                 role.addItem(ROLES[k], k)
             role.setCurrentIndex(roles.index(p.role))
             role.setEnabled(editable and p.role != "super")
+            wheel_only_when_focused(role)
             row.role = role
             self.table.setCellWidget(r, 2, _padded(role))
 

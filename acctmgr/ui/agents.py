@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..db import RepoError
 from ..models import AGENT_KINDS, COMMAND_STATUS, Agent
-from .common import T, button, muted, page_header, px, run_safely, style_table
+from .common import T, button, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
 
 COLS = ["", "번호", "컴퓨터", "실행기", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
 REFRESH_MS = 4000
@@ -69,14 +69,19 @@ def _item(text: str, center: bool = False) -> QTableWidgetItem:
 
 
 class AgentSettingsDialog(QDialog):
-    """실행기 설정 (PC에서는 바꿀 수 없고 여기서만 바꾼다)."""
+    """실행기 설정 (PC에서는 바꿀 수 없고 여기서만 바꾼다).
 
-    def __init__(self, repo, pc, agent: Agent | None, parent=None):
+    bulk에 컴퓨터 여러 대를 주면 '같은 설정 적용' 창: 열 클라우드와 프로그램 위치(컴퓨터마다 다름)는 빼고
+    나머지 값을 그 컴퓨터들에 똑같이 저장한다. 처음 보이는 값은 첫 번째 컴퓨터 것.
+    """
+
+    def __init__(self, repo, pc, agent: Agent | None, parent=None, bulk: list | None = None):
         super().__init__(parent)
         self.repo, self.pc, self.agent = repo, pc, agent
+        self.bulk = bulk
         self.unlinked = False
-        self.setWindowTitle(f"실행기 설정 - {pc.no}. {pc.name}")
-        self.resize(px(620), px(640))
+        self.setWindowTitle(f"같은 설정 적용 - {len(bulk)}대" if bulk else f"실행기 설정 - {pc.no}. {pc.name}")
+        self.resize(px(620), px(560 if bulk else 640))
         cur = dict((agent.state.get("cfg") if agent else None) or {})  # PC에 지금 저장된 값
         cur.update(pc.agent_settings or {})                              # 여기서 정한 값이 우선
         self.cloud = QComboBox()
@@ -93,14 +98,16 @@ class AgentSettingsDialog(QDialog):
         self.wait.setSuffix(" 초")
         self.wait.setMinimumWidth(px(130))
         self.wait.setValue(int((pc.agent_settings or {}).get("restart_wait") or 120))  # 처음엔 120초
+        wheel_only_when_focused(self.cloud, self.wait)
         self.checks = {}
         form = QFormLayout()
-        crow = QHBoxLayout()
-        crow.addWidget(self.cloud, 1)
-        crow.addWidget(self._cmd_btn("목록 다시 읽기", "reload_devices", "그 PC의 실행기가 LD CLOUD 기기 목록을 다시 읽어요"))
-        form.addRow("열 클라우드", crow)
-        if pc.ld_cloud:
-            form.addRow("", muted(f"작업장의 LD클라우드 칸: {pc.ld_cloud}"))
+        if not bulk:
+            crow = QHBoxLayout()
+            crow.addWidget(self.cloud, 1)
+            crow.addWidget(self._cmd_btn("목록 다시 읽기", "reload_devices", "그 PC의 실행기가 LD CLOUD 기기 목록을 다시 읽어요"))
+            form.addRow("열 클라우드", crow)
+            if pc.ld_cloud:
+                form.addRow("", muted(f"작업장의 LD클라우드 칸: {pc.ld_cloud}"))
         wrow = QHBoxLayout()
         wrow.addWidget(self.wait)
         wrow.addWidget(muted("재시작한 뒤 다시 열 때까지 기다리는 시간"))
@@ -138,22 +145,31 @@ class AgentSettingsDialog(QDialog):
             self.hk[key] = e
             form.addRow(label, e)
         # 그 PC의 프로그램 위치 (실행기가 알려 준 값)
-        ld = cur.get("ld_path", "")
-        lrow = QHBoxLayout()
-        lrow.addWidget(self._path_label(ld, "아직 못 찾음"), 1)
-        lrow.addWidget(self._cmd_btn("자동으로 찾기", "find_ld", "그 PC에서 LD CLOUD 설치 위치를 다시 찾아요"))
-        form.addRow("LD CLOUD 위치", lrow)
-        for key in ("AMP", "MAP"):
-            low = key.lower()
-            row = QHBoxLayout()
-            row.addWidget(self._path_label(cur.get(low + "_path", ""), "아직 없음 (한 번 실행하면 저장됨)"), 1)
-            row.addWidget(self._cmd_btn("폴더 열기", low + "_folder", "그 PC 화면에 폴더(탐색기)를 띄워요"))
-            row.addWidget(self._cmd_btn("지우기", low + "_clear", "지우면 다음 실행 때 그 PC에서 다시 찾아요"))
-            form.addRow(f"{key} 위치", row)
+        if not bulk:
+            ld = cur.get("ld_path", "")
+            lrow = QHBoxLayout()
+            lrow.addWidget(self._path_label(ld, "아직 못 찾음"), 1)
+            lrow.addWidget(self._cmd_btn("자동으로 찾기", "find_ld", "그 PC에서 LD CLOUD 설치 위치를 다시 찾아요"))
+            form.addRow("LD CLOUD 위치", lrow)
+            for key in ("AMP", "MAP"):
+                low = key.lower()
+                row = QHBoxLayout()
+                row.addWidget(self._path_label(cur.get(low + "_path", ""), "아직 없음 (한 번 실행하면 저장됨)"), 1)
+                row.addWidget(self._cmd_btn("폴더 열기", low + "_folder", "그 PC 화면에 폴더(탐색기)를 띄워요"))
+                row.addWidget(self._cmd_btn("지우기", low + "_clear", "지우면 다음 실행 때 그 PC에서 다시 찾아요"))
+                form.addRow(f"{key} 위치", row)
         self.cmd_msg = muted("")
 
         lay = QVBoxLayout(self)
-        if agent is None:
+        if bulk:
+            names = ", ".join(f"{p.no}. {p.name}" for p in bulk[:12]) + (f" 외 {len(bulk) - 12}대" if len(bulk) > 12 else "")
+            note = QLabel(f"<b>{len(bulk)}대</b>에 아래 값을 똑같이 저장해요: {names}<br>"
+                          "열 클라우드와 프로그램 위치는 컴퓨터마다 달라서 바뀌지 않아요. "
+                          f"처음 보이는 값은 {pc.no}. {pc.name}의 설정이에요.")
+            note.setWordWrap(True)
+            note.setObjectName("hintBox")
+            lay.addWidget(note)
+        elif agent is None:
             lay.addWidget(muted("이 컴퓨터에 연결된 실행기가 아직 없어요. 설정은 저장해 두면 연결될 때 적용돼요."))
         else:
             lay.addWidget(muted(f"실행기: {agent.machine} · v{agent.version} · {_ago(agent.seconds_ago)}"))
@@ -161,7 +177,7 @@ class AgentSettingsDialog(QDialog):
         lay.addWidget(self.cmd_msg)
         lay.addStretch(1)
         row = QHBoxLayout()
-        if agent is not None and repo.me.is_admin:
+        if agent is not None and repo.me.is_admin and not bulk:
             row.addWidget(button("연결 끊기", "danger", self._unlink, "이 실행기를 이 컴퓨터에서 떼어내요"))
         row.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -217,11 +233,31 @@ class AgentSettingsDialog(QDialog):
         return v
 
     def _save(self) -> None:
+        if self.bulk:
+            self._save_bulk()
+            return
         if not self.value()["cloud"]:
             QMessageBox.warning(self, "확인 필요", "열 클라우드를 고르세요.")
             return
         if run_safely(self, self.repo.set_agent_settings, self.pc.id, self.value()):
             self.accept()
+
+    def _save_bulk(self) -> None:
+        common = self.value()
+        common.pop("cloud", None)  # 열 클라우드는 컴퓨터마다 다르므로 그대로 둠
+        if QMessageBox.question(self, "같은 설정 적용", f"{len(self.bulk)}대에 같은 설정을 저장할까요?") != QMessageBox.Yes:
+            return
+        errors = []
+        for p in self.bulk:
+            s = dict(p.agent_settings or {})
+            s.update(common)
+            try:
+                self.repo.set_agent_settings(p.id, s)
+            except RepoError as e:
+                errors.append(f"{p.no}. {p.name}: {e}")
+        if errors:
+            QMessageBox.warning(self, "일부 못 저장함", "\n".join(errors[:15]))
+        self.accept()
 
     def _unlink(self) -> None:
         if QMessageBox.question(self, "연결 끊기", f"'{self.agent.machine}' 실행기를 이 컴퓨터에서 떼어낼까요?\n"
@@ -244,6 +280,8 @@ class AgentsTab(QWidget):
         self.acc_names: dict[int, str] = {}
         self.checked: set[int] = set()
         self.current_pc: int | None = None
+        self.pending_choice: dict[str, int] = {}   # 연결 대기 실행기별로 내가 고른 컴퓨터 (새로고침해도 유지)
+        self._pending_key = None
 
         hint = QLabel("각 컴퓨터의 LD CLOUD 실행기에 명령을 보내요. 체크한 컴퓨터에 한 번에 보낼 수 있어요.\n"
                       "A 로그인 = 그 컴퓨터 1자리 계정, B 로그인 = 2자리 계정. 실행기 설정은 오른쪽 [설정]에서만 바꿔요.")
@@ -271,6 +309,9 @@ class AgentsTab(QWidget):
         bar2.addWidget(muted("실행기:"))
         bar2.addWidget(button("실행기 다시 켜기", "", lambda: self._send_checked("restart_agent"),
                               "실행기를 껐다가 다시 켜요. 새 버전이 있으면 이때 업데이트돼요"))
+        bar2.addSpacing(px(16))
+        bar2.addWidget(button("선택한 컴퓨터에 같은 설정", "", self._bulk_settings,
+                              "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
         bar2.addStretch(1)
 
         self.table = QTableWidget(0, len(COLS))
@@ -313,7 +354,7 @@ class AgentsTab(QWidget):
         pl.setContentsMargins(0, 8, 0, 0)
         pl.addWidget(QLabel("<b>연결 대기 실행기</b> — 새로 설치되거나 업데이트된 실행기예요. 어느 컴퓨터인지 골라 [연결]을 누르세요."))
         self.pend = QTableWidget(0, 5)
-        self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "마지막 연락", "연결할 컴퓨터", ""])
+        self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "마지막 연락", "연결할 컴퓨터 (눌러서 고르기)", ""])
         self.pend.verticalHeader().setVisible(False)
         style_table(self.pend)
         self.pend.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -507,6 +548,16 @@ class AgentsTab(QWidget):
         if errors:
             QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
 
+    def _bulk_settings(self) -> None:
+        targets = [p for p in self.pcs if p.id in self.checked]
+        if len(targets) < 1:
+            QMessageBox.information(self, "같은 설정", "설정을 바꿀 컴퓨터를 체크하세요.")
+            return
+        first = targets[0]
+        dlg = AgentSettingsDialog(self.repo, first, self.agents.get(first.id), self, bulk=targets)
+        if dlg.exec():
+            self.refresh()
+
     def _settings(self, pc) -> None:
         dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self)
         if dlg.exec():
@@ -549,6 +600,13 @@ class AgentsTab(QWidget):
         if not show:
             return
         taken = set(self.agents)
+        key = (tuple(a.user_id for a in self.pending), tuple(p.id for p in self.pcs), tuple(sorted(taken)))
+        if key == self._pending_key:
+            # 같은 목록이면 칸을 다시 만들지 않는다 (고르던 상자가 닫히거나 바뀌지 않게). 마지막 연락만 갱신
+            for r, ag in enumerate(self.pending):
+                self.pend.setItem(r, 2, _item(_ago(ag.seconds_ago)))
+            return
+        self._pending_key = key
         self.pend.setRowCount(len(self.pending))
         for r, ag in enumerate(self.pending):
             self.pend.setItem(r, 0, _item(ag.machine))
@@ -556,25 +614,43 @@ class AgentsTab(QWidget):
             self.pend.setItem(r, 2, _item(_ago(ag.seconds_ago)))
             combo = QComboBox()
             combo.addItem("컴퓨터 고르기...", None)
-            guess = None
-            cloud = (ag.state.get("cfg") or {}).get("cloud", "")
             for p in self.pcs:
                 combo.addItem(f"{p.no}. {p.name}" + ("  (실행기 있음)" if p.id in taken else ""), p.id)
-                if guess is None and p.id not in taken and (
-                        (p.ld_cloud and cloud and p.ld_cloud.strip() in cloud) or
-                        (p.name and p.name.strip() and p.name.strip() in ag.machine)):
-                    guess = combo.count() - 1
-            if guess:
-                combo.setCurrentIndex(guess)
+            wheel_only_when_focused(combo)  # 지나가다 휠을 굴려도 바뀌지 않게
+            chosen = self.pending_choice.get(ag.user_id)
+            idx = combo.findData(chosen) if chosen is not None else -1
+            combo.setCurrentIndex(idx if idx >= 0 else self._guess_index(ag, combo, taken))
+            combo.currentIndexChanged.connect(lambda _i, a=ag, c=combo: self.pending_choice.__setitem__(a.user_id, c.currentData()))
             self.pend.setCellWidget(r, 3, combo)
             w = QWidget()
             l = QHBoxLayout(w)
             l.setContentsMargins(4, 2, 4, 2)
             l.addWidget(button("연결", "primary", lambda _=False, a=ag, c=combo: self._link(a, c)))
+            l.addWidget(button("추천 다시", "", lambda _=False, a=ag, c=combo: self._reguess(a, c),
+                               "그 PC 실행기가 알려 준 LD 클라우드로 맞는 컴퓨터를 다시 골라요"))
             l.addWidget(button("지우기", "", lambda _=False, a=ag: self._forget(a), "잘못 등록된 실행기를 목록에서 지워요"))
             l.addStretch(1)
             self.pend.setCellWidget(r, 4, w)
         self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
+
+    def _guess_index(self, ag: Agent, combo: QComboBox, taken: set) -> int:
+        """그 PC 실행기가 지금 여는 클라우드(또는 PC 이름)와 맞는 컴퓨터. 없으면 0(고르기)."""
+        cloud = (ag.state.get("cfg") or {}).get("cloud", "").split(" #")[0].strip()  # '이름 #ID' → 이름
+        for i in range(1, combo.count()):
+            p = next((x for x in self.pcs if x.id == combo.itemData(i)), None)
+            if p is None or p.id in taken:
+                continue
+            # 이름이 정확히 같을 때만 ('클라우드1'이 '클라우드10'에 맞지 않게)
+            if (p.ld_cloud and cloud and p.ld_cloud.strip() == cloud) or \
+                    (p.name and p.name.strip() and p.name.strip() == ag.machine.strip()):
+                return i
+        return 0
+
+    def _reguess(self, ag: Agent, combo: QComboBox) -> None:
+        self.pending_choice.pop(ag.user_id, None)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(self._guess_index(ag, combo, set(self.agents)))
+        combo.blockSignals(False)
 
     def _link(self, ag: Agent, combo: QComboBox) -> None:
         pid = combo.currentData()
