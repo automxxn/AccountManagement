@@ -498,6 +498,9 @@ class CloudRepository:
     def delete_pc(self, pc_id: int) -> None:
         self._rpc("delete_pc", {"p_id": pc_id})
 
+    def swap_pc_numbers(self, a_id: int, b_id: int) -> None:
+        self._rpc("swap_pc_numbers", {"p_a": a_id, "p_b": b_id})
+
     def assign(self, pc_id: int, slot: int, account_id: int) -> None:
         self._rpc("assign_account", {"p_pc": pc_id, "p_slot": slot, "p_account": account_id})
 

@@ -550,6 +550,27 @@ class WorkplaceTab(QWidget):
             self.panel_sub.setText("빈 자리예요. 넣을 계정을 고르세요.")
             self._render_picker()
 
+    def swap_numbers(self, pc: PC) -> None:
+        """이 컴퓨터와 다른 컴퓨터의 번호를 서로 바꾼다 (블록이 통째로 자리를 바꿈)."""
+        others = [p for p in self.pcs if p.id != pc.id]
+        if not others:
+            return
+        items = [f"{p.no}. {p.name}" for p in others]
+        choice, ok = QInputDialog.getItem(self, "번호 바꾸기",
+                                          f"[{pc.no}. {pc.name}]과(와) 번호를 서로 바꿀 컴퓨터를 고르세요.\n"
+                                          "컴퓨터 정보, 자리 계정, 실행기 연결은 각 컴퓨터에 그대로 붙어서 같이 움직여요.",
+                                          items, 0, False)
+        if not ok:
+            return
+        other = others[items.index(choice)]
+        if QMessageBox.question(self, "번호 바꾸기",
+                                f"{pc.no}번 ↔ {other.no}번\n\n"
+                                f"이제 {pc.no}번 = {other.name}, {other.no}번 = {pc.name} 이 돼요. 바꿀까요?") != QMessageBox.Yes:
+            return
+        if run_safely(self, self.repo.swap_pc_numbers, pc.id, other.id):
+            self.refresh()
+            self.changed.emit()
+
     def _pc_tools(self, pc: PC) -> None:
         """패널 맨 위: 이 컴퓨터 수정, 자리 추가/삭제."""
         can_edit = self.repo.me.can("can_edit_pc")
@@ -557,6 +578,8 @@ class WorkplaceTab(QWidget):
         row.setSpacing(6)
         row.addWidget(button("컴퓨터 수정" if can_edit else "컴퓨터 정보", "", lambda: self.edit_pc(pc)))
         if can_edit:
+            row.addWidget(button("번호 바꾸기", "", lambda: self.swap_numbers(pc),
+                                 "다른 컴퓨터와 번호를 서로 바꿔요 (계정·정보·실행기는 각 컴퓨터에 그대로 붙어서 함께 옮겨져요)"))
             row.addWidget(button("+ 자리", "", lambda: self.change_slots(pc, +1), "이 컴퓨터에 계정 자리를 하나 더 만들어요"))
             if pc.slot_count > MIN_SLOTS:
                 row.addWidget(button("- 자리", "", lambda: self.change_slots(pc, -1), "맨 아래 자리를 없애요 (비어 있을 때만)"))

@@ -60,6 +60,30 @@ def _took(c: dict) -> str:
     return " · ".join(parts)
 
 
+def cloud_match(ld_cloud: str, device: str) -> int:
+    """작업장 LD클라우드 칸 값과 LD CLOUD 기기 이름이 같은 클라우드인지 점수 (0 = 아님, 클수록 확실).
+
+    '클라우드1' ↔ '클라우드1번장시재' 처럼 한쪽이 다른 쪽을 품고 있으면 같은 것으로 보되,
+    바로 뒤(또는 앞)에 숫자가 붙으면 다른 번호이므로 아님 ('클라우드1' ↔ '클라우드10').
+    """
+    a = "".join((ld_cloud or "").split()).lower()
+    b = "".join((device or "").split()).lower()
+    if not a or not b:
+        return 0
+    if a == b:
+        return 500 + len(a)
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    start = long_.find(short)
+    while start >= 0:
+        end = start + len(short)
+        before = long_[start - 1] if start > 0 else ""
+        after = long_[end] if end < len(long_) else ""
+        if not before.isdigit() and not after.isdigit():
+            return len(short)
+        start = long_.find(short, start + 1)
+    return 0
+
+
 def _item(text: str, center: bool = False) -> QTableWidgetItem:
     it = QTableWidgetItem(text)
     it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -75,9 +99,11 @@ class AgentSettingsDialog(QDialog):
     나머지 값을 그 컴퓨터들에 똑같이 저장한다. 처음 보이는 값은 첫 번째 컴퓨터 것.
     """
 
-    def __init__(self, repo, pc, agent: Agent | None, parent=None, bulk: list | None = None):
+    def __init__(self, repo, pc, agent: Agent | None, parent=None, bulk: list | None = None,
+                 all_pcs: list | None = None, linked: set | None = None):
         super().__init__(parent)
         self.repo, self.pc, self.agent = repo, pc, agent
+        self.linked = linked or set()
         self.bulk = bulk
         self.unlinked = False
         self.setWindowTitle(f"같은 설정 적용 - {len(bulk)}대" if bulk else f"실행기 설정 - {pc.no}. {pc.name}")
@@ -174,6 +200,19 @@ class AgentSettingsDialog(QDialog):
         else:
             lay.addWidget(muted(f"실행기: {agent.machine} · v{agent.version} · {_ago(agent.seconds_ago)}"))
         lay.addLayout(form)
+        if agent is not None and repo.me.is_admin and not bulk:
+            # 잘못 연결했거나 컴퓨터 자리가 바뀌었을 때: 이 실행기를 다른 컴퓨터로 옮기기
+            box_m = QGroupBox("이 실행기를 다른 컴퓨터로 옮기기 (잘못 연결했거나 자리가 바뀌었을 때)")
+            mrow = QHBoxLayout(box_m)
+            self.move_to = QComboBox()
+            self.move_to.addItem("옮길 컴퓨터 고르기...", None)
+            for p in (all_pcs or []):
+                if p.id != pc.id:
+                    self.move_to.addItem(f"{p.no}. {p.name}" + ("  (실행기 있음)" if p.id in (linked or set()) else ""), p.id)
+            wheel_only_when_focused(self.move_to)
+            mrow.addWidget(self.move_to, 1)
+            mrow.addWidget(button("옮기기", "", self._move, "이 실행기를 고른 컴퓨터 줄에 연결해요"))
+            lay.addWidget(box_m)
         lay.addWidget(self.cmd_msg)
         lay.addStretch(1)
         row = QHBoxLayout()
@@ -258,6 +297,26 @@ class AgentSettingsDialog(QDialog):
         if errors:
             QMessageBox.warning(self, "일부 못 저장함", "\n".join(errors[:15]))
         self.accept()
+
+    def _move(self) -> None:
+        target = self.move_to.currentData()
+        if target is None:
+            QMessageBox.information(self, "옮기기", "옮길 컴퓨터를 고르세요.")
+            return
+        name = self.move_to.currentText().replace("  (실행기 있음)", "")
+        msg = (f"'{self.agent.machine}' 실행기를 [{self.pc.no}. {self.pc.name}] → [{name}]으로 옮길까요?\n"
+               f"[{name}]의 실행기 설정(열 클라우드 등)과 자리 계정을 쓰게 돼요.")
+        if target in self.linked:
+            msg += f"\n\n[{name}]에 연결돼 있던 실행기는 연결 대기로 돌아가요."
+        if QMessageBox.question(self, "실행기 옮기기", msg) != QMessageBox.Yes:
+            return
+        if run_safely(self, self.repo.link_agent, self.agent.user_id, target):
+            try:
+                self.repo.sync_pc_creds()  # 새 자리 계정을 그 실행기에 보내 둠
+            except RepoError:
+                pass
+            self.unlinked = True
+            self.accept()
 
     def _unlink(self) -> None:
         if QMessageBox.question(self, "연결 끊기", f"'{self.agent.machine}' 실행기를 이 컴퓨터에서 떼어낼까요?\n"
@@ -559,7 +618,7 @@ class AgentsTab(QWidget):
             self.refresh()
 
     def _settings(self, pc) -> None:
-        dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self)
+        dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self, all_pcs=self.pcs, linked=set(self.agents))
         if dlg.exec():
             self.refresh()
 
@@ -647,15 +706,17 @@ class AgentsTab(QWidget):
     def _guess_index(self, ag: Agent, combo: QComboBox, taken: set) -> int:
         """그 PC 실행기가 지금 여는 클라우드(또는 PC 이름)와 맞는 컴퓨터. 없으면 0(고르기)."""
         cloud = (ag.state.get("cfg") or {}).get("cloud", "").split(" #")[0].strip()  # '이름 #ID' → 이름
+        best, best_score = 0, 0
         for i in range(1, combo.count()):
             p = next((x for x in self.pcs if x.id == combo.itemData(i)), None)
             if p is None or p.id in taken:
                 continue
-            # 이름이 정확히 같을 때만 ('클라우드1'이 '클라우드10'에 맞지 않게)
-            if (p.ld_cloud and cloud and p.ld_cloud.strip() == cloud) or \
-                    (p.name and p.name.strip() and p.name.strip() == ag.machine.strip()):
-                return i
-        return 0
+            score = max([cloud_match(part, cloud) for part in (p.ld_cloud or "").split("/")] + [0])
+            if p.name and p.name.strip() and p.name.strip() == ag.machine.strip():
+                score = max(score, 1000)
+            if score > best_score:
+                best, best_score = i, score
+        return best
 
     def _reguess(self, ag: Agent, combo: QComboBox) -> None:
         self.pending_choice.pop(ag.user_id, None)

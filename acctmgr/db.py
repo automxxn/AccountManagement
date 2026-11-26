@@ -295,6 +295,21 @@ class Repository:
             self.conn.execute("DELETE FROM pcs WHERE id=?", (pc_id,))
             self._log("컴퓨터 삭제", f"{r['no']}. {r['name']} (들어 있던 계정은 사용가능으로 돌아감)")
 
+    def swap_pc_numbers(self, a_id: int, b_id: int) -> None:
+        """두 컴퓨터의 번호를 서로 바꾼다 (자리 계정과 정보는 각 컴퓨터에 그대로)."""
+        a = self.conn.execute("SELECT id, no, name FROM pcs WHERE id=?", (a_id,)).fetchone()
+        b = self.conn.execute("SELECT id, no, name FROM pcs WHERE id=?", (b_id,)).fetchone()
+        if not a or not b:
+            raise RepoError("없는 컴퓨터예요. 새로고침하세요.")
+        if a["id"] == b["id"]:
+            raise RepoError("다른 컴퓨터를 고르세요.")
+        tmp = (self.conn.execute("SELECT COALESCE(MIN(no), 0) FROM pcs").fetchone()[0]) - 1
+        with self.conn:
+            self.conn.execute("UPDATE pcs SET no=? WHERE id=?", (tmp, a["id"]))
+            self.conn.execute("UPDATE pcs SET no=?, version=version+1 WHERE id=?", (a["no"], b["id"]))
+            self.conn.execute("UPDATE pcs SET no=?, version=version+1 WHERE id=?", (b["no"], a["id"]))
+            self._log("컴퓨터 번호 바꾸기", f"{a['no']}. {a['name']} ↔ {b['no']}. {b['name']}")
+
     # ------------------------------------------------------------------ 배정
     def _pc_label(self, pc_id: int, slot: int) -> str:
         r = self.conn.execute("SELECT no FROM pcs WHERE id=?", (pc_id,)).fetchone()

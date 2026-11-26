@@ -629,6 +629,28 @@ begin
     perform _log('컴퓨터 삭제', coalesce(v_label, '') || ' (들어 있던 계정은 사용가능으로 돌아감)', v_team);
 end $$;
 
+-- 두 컴퓨터의 번호를 서로 바꾸기 (자리 계정, 컴퓨터 정보, 실행기 연결은 각 컴퓨터에 그대로 붙어서 함께 움직임)
+create or replace function public.swap_pc_numbers(p_a bigint, p_b bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+    a   pcs%rowtype;
+    b   pcs%rowtype;
+    tmp integer;
+begin
+    select * into a from pcs where id = p_a for update;
+    select * into b from pcs where id = p_b for update;
+    if a.id is null or b.id is null then raise exception '없는 컴퓨터예요. 새로고침하세요.'; end if;
+    if a.id = b.id then raise exception '다른 컴퓨터를 고르세요.'; end if;
+    if a.team_id <> b.team_id then raise exception '같은 팀 컴퓨터끼리만 바꿀 수 있어요.'; end if;
+    if not (owns_pc(p_a) and has_perm('edit_pc')) then raise exception '컴퓨터 정보 수정 권한이 없어요.'; end if;
+    select coalesce(min(no), 0) - 1 into tmp from pcs where team_id = a.team_id;   -- 잠깐 비켜 둘 번호
+    update pcs set no = tmp where id = a.id;
+    update pcs set no = a.no, version = version + 1, updated_at = now() where id = b.id;
+    update pcs set no = b.no, version = version + 1, updated_at = now() where id = a.id;
+    perform _log('컴퓨터 번호 바꾸기', format('%s. %s ↔ %s. %s (이제 %s번 = %s, %s번 = %s)',
+        a.no, a.name, b.no, b.name, a.no, b.name, b.no, a.name), a.team_id);
+end $$;
+
 -- ============================================================ 명의자 규칙
 -- 같은 명의자 계정은 팀 작업장 전체에 최대 2개까지, 그리고 그 2개는 같은 컴퓨터에만 넣을 수 있다.
 -- 명의자 이름이 비어 있으면 연락처로 판단하고, 둘 다 없으면 규칙을 적용하지 않는다.
@@ -1273,7 +1295,7 @@ grant execute on function
     public.can_see_account(bigint), public._pc_visible(bigint), public.owns_pc(bigint),
     public._shares_team(uuid), public._can_see_profile(uuid),
     public.save_account(jsonb), public.delete_account(bigint), public.approve_delete(bigint), public.reject_delete(bigint),
-    public.save_pc(jsonb), public.delete_pc(bigint),
+    public.save_pc(jsonb), public.delete_pc(bigint), public.swap_pc_numbers(bigint, bigint),
     public.assign_account(bigint, integer, bigint), public.unassign_slot(bigint, integer),
     public.move_account(bigint, bigint, integer),
     public.save_profile(jsonb), public.create_team(text, text, text), public.rename_team(bigint, text),
