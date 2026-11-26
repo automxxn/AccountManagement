@@ -10,10 +10,18 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import PERMS, ROLES, Profile
-from .common import muted, run_safely
+from .common import button, muted, page_header, run_safely
 from ..cloud import LOGIN_DOMAIN
 
 COLS = ["이름", "아이디", "역할"] + [label for _, label in PERMS] + [""]
+
+
+def _padded(w: QWidget) -> QWidget:
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(6, 4, 6, 4)
+    lay.addWidget(w)
+    return box
 
 
 def short_login(login: str) -> str:
@@ -26,19 +34,26 @@ class WorkersTab(QWidget):
 
     def __init__(self, repo):
         super().__init__()
+        self.setObjectName("page")
         self.repo = repo
         self.workers: list[Profile] = []
-        hint = muted("근무자가 프로그램에서 '처음 사용해요 (가입 요청)'으로 가입하면 여기에 '승인 대기'로 나타나요. "
-                     "역할을 근무자로 바꾸고 권한을 고른 뒤 저장하세요. 근무자는 담당 컴퓨터와 담당 계정만 볼 수 있어요. "
-                     "담당은 컴퓨터/계정 수정 창에서 정해요.")
+        hint = QLabel("① 근무자가 프로그램에서 '처음 사용해요 (가입 요청)'으로 가입하면 여기에 '승인 대기'로 나타나요.\n"
+                      "② 역할을 '근무자'로 바꾸고 권한을 체크한 뒤 저장하세요.\n"
+                      "③ 컴퓨터/계정 수정 창의 '담당 근무자'에서 맡길 것을 정하세요. 근무자는 담당 컴퓨터와 담당 계정만 볼 수 있어요.")
         hint.setWordWrap(True)
+        hint.setStyleSheet("background:#FFFFFF; border:1px solid #E4E6EA; border-radius:10px; padding:12px 14px; color:#3D4450;")
         self.table = QTableWidget(0, len(COLS))
         self.table.setHorizontalHeaderLabels(COLS)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(44)
+        self.table.setShowGrid(False)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(14)
+        lay.addWidget(page_header("근무자 관리", "가입 승인과 근무자별 권한을 정해요"))
         lay.addWidget(hint)
         lay.addWidget(self.table, 1)
 
@@ -55,7 +70,7 @@ class WorkersTab(QWidget):
             for k, v in ROLES.items():
                 role.addItem(v, k)
             role.setCurrentIndex(list(ROLES).index(p.role))
-            self.table.setCellWidget(r, 2, role)
+            self.table.setCellWidget(r, 2, _padded(role))
             checks = []
             for c, (attr, _label) in enumerate(PERMS, start=3):
                 cb = QCheckBox()
@@ -73,11 +88,13 @@ class WorkersTab(QWidget):
                 cb.setEnabled(p.role == "worker")
             if p.id == self.repo.me.id:
                 role.setEnabled(False)
-                save = QLabel(" (나)")
+                save = muted("나")
             else:
-                save = QPushButton("저장")
+                save = button("저장", "primary")
                 save.clicked.connect(lambda _=False, r=r, p=p, role=role, checks=checks: self._save(r, p, role, checks))
-            self.table.setCellWidget(r, len(COLS) - 1, save)
+            self.table.setCellWidget(r, len(COLS) - 1, _padded(save))
+        for c, w in enumerate([180, 160, 140] + [120] * len(PERMS) + [100]):
+            self.table.setColumnWidth(c, w)
 
     def _save(self, r: int, p: Profile, role: QComboBox, checks: list[QCheckBox]) -> None:
         q = copy.copy(p)

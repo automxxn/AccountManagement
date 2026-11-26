@@ -16,6 +16,12 @@ from .common import copy_text, muted
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def section(text: str) -> QLabel:
+    lab = QLabel(text)
+    lab.setObjectName("sectionTitle")
+    return lab
+
+
 class PasswordField(QWidget):
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)
@@ -101,15 +107,19 @@ class AccountDialog(QDialog):
         self.withdrawn.setChecked(a.withdrawn)
         self.note = QPlainTextEdit(a.note)
         self.note.setFixedHeight(70)
-        form.addRow("명의자", self.owner)
+        form.addRow(section("명의자"))
+        form.addRow("이름", self.owner)
         form.addRow("연락처", self.contact)
+        form.addRow(section("로그인"))
         form.addRow("유형", self.provider)
         form.addRow("아이디 *", self.login)
         form.addRow("비밀번호", self.pw)
         form.addRow("메월닉", self.tag)
+        form.addRow(section("상태"))
         form.addRow("메랜정지", self.mr_ban)
         form.addRow("플래닛정지", self.pl_ban)
         form.addRow("", self.withdrawn)
+        form.addRow(section("메모"))
         form.addRow("비고", self.note)
 
         self.chars = QTableWidget(0, 3)
@@ -133,6 +143,7 @@ class AccountDialog(QDialog):
 
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("저장")
+        box.button(QDialogButtonBox.Save).setObjectName("primary")
         box.button(QDialogButtonBox.Cancel).setText("취소")
         box.accepted.connect(self._save)
         box.rejected.connect(self.reject)
@@ -146,7 +157,7 @@ class AccountDialog(QDialog):
         if a.location:
             lay.addWidget(muted(f"현재 위치: {a.location.text()}"))
         lay.addLayout(form)
-        lay.addWidget(QLabel("캐릭터"))
+        lay.addWidget(section("캐릭터 (게임마다 여러 개 가능)"))
         lay.addWidget(self.chars, 1)
         lay.addLayout(btns)
         lay.addWidget(box)
@@ -234,18 +245,22 @@ class PcDialog(QDialog):
         self.slots.setValue(p.slot_count)
         self.note = QPlainTextEdit(p.note)
         self.note.setFixedHeight(60)
+        form.addRow(section("컴퓨터"))
         form.addRow("번호", self.no)
         form.addRow("이름", self.name)
+        form.addRow("자리 수", self.slots)
+        form.addRow(section("원격 접속"))
         form.addRow("리모트T", self.remote_t)
         form.addRow("AnyDesk", self.anydesk)
         form.addRow("AnyDesk 비번", self.anydesk_pw)
         form.addRow("VPN 세팅", self.vpn)
         form.addRow("LD클라우드", self.ld)
-        form.addRow("자리 수", self.slots)
+        form.addRow(section("메모"))
         form.addRow("비고", self.note)
 
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("저장")
+        box.button(QDialogButtonBox.Save).setObjectName("primary")
         box.button(QDialogButtonBox.Cancel).setText("취소")
         box.accepted.connect(self._save)
         box.rejected.connect(self.reject)

@@ -3,7 +3,9 @@ import sys
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
+from . import logsetup
 from .db import Repository
+from .version import __version__
 from .ui.common import APP_STYLE
 from .ui.connect import start_repository
 from .ui.main_window import MainWindow
@@ -11,6 +13,8 @@ from .ui.update_ui import startup_check
 
 
 def main() -> None:
+    logsetup.setup()
+    logsetup.log.info("시작 v%s", __version__)
     app = QApplication(sys.argv)
     app.setApplicationName("AccountManagement")
     app.setStyle("Fusion")

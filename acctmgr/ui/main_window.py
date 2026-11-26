@@ -1,19 +1,22 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QHeaderView, QInputDialog, QMainWindow, QMessageBox,
-    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .. import logsetup
 from ..db import Repository, RepoError
 from ..importer import import_workbook, snapshot
 from ..models import ROLES
 from ..version import __version__
 from .accounts import AccountsTab
-from .update_ui import manual_check
+from .common import button, label, muted, page, page_header
 from .connect import ConnectionDialog, settings
+from .update_ui import manual_check
 from .workers import WorkersTab
 from .workplace import WorkplaceTab
 
@@ -23,15 +26,23 @@ POLL_MS = 8000
 class HistoryTab(QWidget):
     def __init__(self, repo):
         super().__init__()
+        self.setObjectName("page")
         self.repo = repo
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 20)
+        lay.setSpacing(16)
+        lay.addWidget(page_header("변경 기록", "누가 언제 무엇을 바꿨는지 최근 500건을 보여줘요"))
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["시각", "작업자", "작업", "내용"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        lay = QVBoxLayout(self)
-        lay.addWidget(self.table)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        lay.addWidget(self.table, 1)
 
     def refresh(self) -> None:
         rows = self.repo.list_log()
@@ -40,6 +51,7 @@ class HistoryTab(QWidget):
             for c, key in enumerate(("at", "actor", "action", "detail")):
                 self.table.setItem(r, c, QTableWidgetItem(str(row[key])))
         self.table.resizeColumnsToContents()
+        self.table.setColumnWidth(0, max(self.table.columnWidth(0), 160))
 
 
 class MainWindow(QMainWindow):
@@ -51,52 +63,30 @@ class MainWindow(QMainWindow):
         if not self.cloud:
             repo.actor = settings().value("actor", "") or self._ask_actor(first=True)
         self._update_title()
-        self.resize(1400, 860)
+        self.resize(1480, 900)
 
+        # 페이지
         self.work = WorkplaceTab(repo)
         self.accounts = AccountsTab(repo)
         self.history = HistoryTab(repo)
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self.work, "작업장")
-        self.tabs.addTab(self.accounts, "계정")
-        self.tabs.addTab(self.history, "변경 기록")
-        self.workers_tab = None
-        if self.cloud and me.is_admin:
-            self.workers_tab = WorkersTab(repo)
-            self.tabs.addTab(self.workers_tab, "근무자 관리")
+        self.workers_tab = WorkersTab(repo) if (self.cloud and me.is_admin) else None
+        self.pages = [("작업장", self.work), ("계정", self.accounts), ("변경 기록", self.history)]
+        if self.workers_tab:
+            self.pages.append(("근무자 관리", self.workers_tab))
             self.workers_tab.changed.connect(self._after_change)
-        self.tabs.currentChanged.connect(lambda _: self._refresh_current())
-        self.setCentralWidget(self.tabs)
+        self.stack = QStackedWidget()
+        for _, w in self.pages:
+            self.stack.addWidget(w)
         self.work.changed.connect(self._after_change)
         self.accounts.changed.connect(self._after_change)
 
-        menu = self.menuBar().addMenu("파일")
-        if me.is_admin:
-            act = QAction("엑셀에서 가져오기...", self)
-            act.triggered.connect(self._import)
-            menu.addAction(act)
-        if self.cloud and me.is_admin:
-            up = QAction("이 PC의 로컬 데이터를 클라우드로 올리기...", self)
-            up.triggered.connect(self._upload_local)
-            menu.addAction(up)
-        if not self.cloud:
-            act2 = QAction("작업자 이름 바꾸기...", self)
-            act2.triggered.connect(lambda: (self._ask_actor(), self._update_title()))
-            menu.addAction(act2)
-        conn = QAction("연결 설정... (다시 시작 필요)", self)
-        conn.triggered.connect(self._connection)
-        menu.addAction(conn)
-        upd = QAction(f"업데이트 확인... (지금 v{__version__})", self)
-        upd.triggered.connect(self._check_update)
-        menu.addAction(upd)
-        menu.addSeparator()
-        quit_act = QAction("종료", self)
-        quit_act.triggered.connect(self.close)
-        menu.addAction(quit_act)
-        refresh = QAction("새로고침 (F5)", self)
-        refresh.setShortcut("F5")
-        refresh.triggered.connect(self.refresh_all)
-        self.menuBar().addAction(refresh)
+        central = QWidget()
+        h = QHBoxLayout(central)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        h.addWidget(self._sidebar())
+        h.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
 
         self._last_change = None
         self.refresh_all()
@@ -105,7 +95,79 @@ class MainWindow(QMainWindow):
             self.timer.timeout.connect(self._poll)
             self.timer.start(POLL_MS)
         if me.is_admin and repo.is_empty():
-            QMessageBox.information(self, "시작하기", "아직 데이터가 없어요.\n파일 메뉴에서 엑셀을 가져오거나 로컬 데이터를 올리세요.")
+            QMessageBox.information(self, "시작하기", "아직 데이터가 없어요.\n왼쪽 아래 메뉴에서 엑셀을 가져오거나 로컬 데이터를 올리세요.")
+
+    # ---------------------------------------------------------------- 사이드바
+    def _sidebar(self) -> QFrame:
+        side = QFrame()
+        side.setObjectName("sidebar")
+        side.setFixedWidth(220)
+        lay = QVBoxLayout(side)
+        lay.setContentsMargins(14, 20, 14, 14)
+        lay.setSpacing(6)
+        lay.addWidget(label("AccountManagement", "appTitle"))
+        lay.addWidget(label(f"v{__version__} · {'클라우드' if self.cloud else '이 PC에 저장'}", "appVersion"))
+        lay.addSpacing(14)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        self.nav.setCursor(Qt.PointingHandCursor)
+        for name, _ in self.pages:
+            it = QListWidgetItem(name)
+            it.setSizeHint(QSize(0, 40))
+            self.nav.addItem(it)
+        self.nav.setCurrentRow(0)
+        self.nav.currentRowChanged.connect(self._go)
+        lay.addWidget(self.nav, 1)
+
+        lay.addWidget(button("새로고침  (F5)", "", self.refresh_all))
+        act = QAction(self)
+        act.setShortcut("F5")
+        act.triggered.connect(self.refresh_all)
+        self.addAction(act)
+
+        user = QFrame()
+        user.setObjectName("userBox")
+        ul = QVBoxLayout(user)
+        ul.setContentsMargins(12, 10, 12, 10)
+        ul.setSpacing(2)
+        ul.addWidget(label(self.repo.actor or "-", "title"))
+        role = ROLES.get(self.repo.me.role, "") if self.cloud else "관리자"
+        ul.addWidget(muted(role))
+        more = QToolButton()
+        more.setText("메뉴 열기")
+        more.setCursor(Qt.PointingHandCursor)
+        more.setPopupMode(QToolButton.InstantPopup)
+        more.setMenu(self._menu())
+        more.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        more.setMinimumWidth(170)
+        ul.addSpacing(6)
+        ul.addWidget(more)
+        lay.addWidget(user)
+        return side
+
+    def _menu(self) -> QMenu:
+        m = QMenu(self)
+        me = self.repo.me
+        if me.is_admin:
+            m.addAction("엑셀에서 가져오기...", self._import)
+        if self.cloud and me.is_admin:
+            m.addAction("이 PC의 로컬 데이터를 클라우드로 올리기...", self._upload_local)
+        if not self.cloud:
+            m.addAction("작업자 이름 바꾸기...", lambda: (self._ask_actor(), self._update_title()))
+        m.addAction("연결 설정... (다시 시작 필요)", self._connection)
+        m.addSeparator()
+        m.addAction(f"업데이트 확인... (지금 v{__version__})", self._check_update)
+        m.addAction("오류 기록(로그) 폴더 열기", logsetup.open_log_folder)
+        m.addSeparator()
+        m.addAction("종료", self.close)
+        return m
+
+    def _go(self, row: int) -> None:
+        if row < 0:
+            return
+        self.stack.setCurrentIndex(row)
+        self._safe(self.stack.currentWidget().refresh)
 
     # ---------------------------------------------------------------- 공통
     def _ask_actor(self, first: bool = False) -> str:
@@ -125,24 +187,20 @@ class MainWindow(QMainWindow):
         try:
             fn()
         except RepoError as e:
+            logsetup.log.warning("새로고침 실패: %s", e)
             self.statusBar().showMessage(f"새로고침 실패: {e}", 10000)
-
-    def _refresh_current(self) -> None:
-        self._safe(self.tabs.currentWidget().refresh)
 
     def refresh_all(self) -> None:
         def go():
-            for t in (self.work, self.accounts, self.history, self.workers_tab):
-                if t:
-                    t.refresh()
+            for _, t in self.pages:
+                t.refresh()
             self._last_change = self.repo.last_change()
         self._safe(go)
 
     def _after_change(self) -> None:
-        # 지금 탭은 이미 새로 그렸으니 나머지만
         def go():
-            for t in (self.work, self.accounts, self.history, self.workers_tab):
-                if t and t is not self.tabs.currentWidget():
+            for _, t in self.pages:
+                if t is not self.stack.currentWidget():
                     t.refresh()
             self._last_change = self.repo.last_change()
         self._safe(go)
@@ -184,6 +242,7 @@ class MainWindow(QMainWindow):
         try:
             report = import_workbook(path, self.repo)
         except Exception as e:  # 엑셀 형식 문제는 그대로 보여준다
+            logsetup.log.exception("엑셀 가져오기 실패")
             QMessageBox.critical(self, "가져오기 실패", str(e))
             return
         self.refresh_all()
