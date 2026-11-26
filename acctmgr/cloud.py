@@ -542,7 +542,7 @@ class CloudRepository:
                 ago = (datetime.now(timezone.utc) - t).total_seconds()
             except ValueError:
                 pass
-        return Agent(user_id=r["user_id"], pc_id=r.get("pc_id"), machine=r.get("machine", ""),
+        return Agent(user_id=r["user_id"], pc_id=r.get("pc_id"), team_id=r.get("team_id"), machine=r.get("machine", ""),
                      version=r.get("version", ""), public_key=r.get("public_key", ""),
                      last_seen=(seen or "")[:19].replace("T", " "), seconds_ago=ago,
                      state=r.get("state") or {}, devices=list(r.get("devices") or []))
@@ -556,8 +556,12 @@ class CloudRepository:
     def forget_agent(self, agent_id: str) -> None:
         self._rpc("forget_agent", {"p_agent": agent_id})
 
-    def send_command(self, pc_id: int, kind: str) -> int:
-        return int(self._rpc("send_pc_command", {"p_pc": pc_id, "p_kind": kind}))
+    def send_command(self, pc_id: int, kind: str, arg: str = "") -> int:
+        """arg: 명령에 붙는 값 (예: AMP 실행 → 어느 게임의 AMP)."""
+        return int(self._rpc("send_pc_command", {"p_pc": pc_id, "p_kind": kind, "p_arg": arg or ""}))
+
+    def set_agent_team(self, agent_id: str, team_id: int | None) -> None:
+        self._rpc("set_agent_team", {"p_agent": agent_id, "p_team": team_id})
 
     def list_commands(self, pc_ids: list[int], limit: int = 200) -> list[dict]:
         if not pc_ids:

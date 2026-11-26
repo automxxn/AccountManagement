@@ -1058,6 +1058,9 @@ create table if not exists public.agents (
     created_at  timestamptz not null default now()
 );
 
+-- 실행기가 속한 팀 (연결 대기 실행기를 그 팀 관리자에게만 보이게). 연결하면 그 컴퓨터의 팀
+alter table public.agents add column if not exists team_id bigint references public.teams(id) on delete set null;
+
 -- 실행기 설정 (열 클라우드, 재시작 옵션, 단축키 등). 작업장 프로그램에서만 바꾼다
 alter table public.pcs add column if not exists agent_settings jsonb not null default '{}'::jsonb;
 
@@ -1075,7 +1078,7 @@ create table if not exists public.pc_commands (
     pc_id        bigint not null references public.pcs(id) on delete cascade,
     kind         text not null check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop',
                                         'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
-                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent')),
+                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent', 'amp_find')),
     status       text not null default 'queued' check (status in ('queued', 'running', 'done', 'failed', 'cancelled')),
     result       text not null default '',
     log          text not null default '',
@@ -1086,11 +1089,13 @@ create table if not exists public.pc_commands (
     finished_at  timestamptz
 );
 create index if not exists pc_commands_pc_idx on public.pc_commands(pc_id, id);
+-- 명령에 붙는 값 (예: AMP 실행 → 어느 게임의 AMP)
+alter table public.pc_commands add column if not exists arg text not null default '';
 -- 명령 종류가 늘어나면 제한을 다시 건다
 alter table public.pc_commands drop constraint if exists pc_commands_kind_check;
 alter table public.pc_commands add constraint pc_commands_kind_check check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop',
                                         'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
-                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent'));
+                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent', 'amp_find'));
 
 -- LD 클라우드 표기 '이름 #ID' 나누기
 create or replace function public._cloud_id(c text) returns text
@@ -1101,6 +1106,14 @@ $$;
 create or replace function public._cloud_name(c text) returns text
 language sql immutable as $$
     select trim(split_part(coalesce(c, ''), ' #', 1))
+$$;
+
+create or replace function public._agent_cloud_ids(p_devices jsonb, p_cloud text) returns text[]
+language sql immutable as $$
+    select array_remove(array_agg(distinct x), null) from (
+        select _cloud_id(d) as x from jsonb_array_elements_text(
+            case when jsonb_typeof(coalesce(p_devices, '[]'::jsonb)) = 'array' then p_devices else '[]'::jsonb end) d
+        union all select _cloud_id(p_cloud)) t
 $$;
 
 -- 이 실행기(로그인한 agent)가 연결된 컴퓨터
@@ -1127,7 +1140,7 @@ alter table public.pc_commands  enable row level security;
 drop policy if exists agents_read on public.agents;
 create policy agents_read on public.agents for select to authenticated
     using (user_id = auth.uid()
-           or (pc_id is null and is_admin())
+           or (pc_id is null and (is_super() or (team_id is not null and is_team_admin(team_id))))
            or (pc_id is not null and (_pc_visible(_pc_team(pc_id)) or _can_control(pc_id))));
 
 drop policy if exists pc_creds_read on public.pc_creds;
@@ -1167,6 +1180,8 @@ declare
     v_cid     text;
     v_cands   bigint[];
     v_changed bigint;
+    v_ids     text[];
+    v_teams   bigint[];
 begin
     if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
     update agents set last_seen = now(), state = coalesce(p_state, state),
@@ -1176,16 +1191,36 @@ begin
     if not found then raise exception '먼저 등록해야 해요.'; end if;
     v_cloud := v_ag.state -> 'cfg' ->> 'cloud';
     v_cid := _cloud_id(v_cloud);
+    -- 팀이 아직 없으면 추측: 이 실행기의 LD 클라우드들이 어느 팀 컴퓨터(정한 클라우드/예전 클라우드)나
+    -- 그 팀에 연결된 다른 실행기의 LD 목록과 겹치는지. 딱 한 팀일 때만 정한다 (아니면 총관리자가 정함)
+    if v_ag.pc_id is null and v_ag.team_id is null then
+        v_ids := _agent_cloud_ids(v_ag.devices, v_cloud);
+        if cardinality(v_ids) > 0 then
+            select array_agg(distinct t) into v_teams from (
+                select p.team_id as t from pcs p
+                 where _cloud_id(p.agent_settings ->> 'cloud') = any (v_ids)
+                    or _cloud_id(p.agent_settings ->> 'prev_cloud') = any (v_ids)
+                union
+                select p.team_id from agents a join pcs p on p.id = a.pc_id
+                 where a.user_id <> v_ag.user_id and _agent_cloud_ids(a.devices, a.state -> 'cfg' ->> 'cloud') && v_ids
+            ) q;
+            if cardinality(v_teams) = 1 then
+                update agents set team_id = v_teams[1] where user_id = v_ag.user_id;
+                v_ag.team_id := v_teams[1];
+            end if;
+        end if;
+    end if;
     -- 자동 연결: 작업장 PC 조종에서 이 클라우드를 정해 둔 컴퓨터가 딱 하나 있고, 거기에 다른 실행기가 없고,
     -- 같은 클라우드를 여는 다른 연결 대기 실행기도 없으면 그 컴퓨터에 연결한다
     if v_ag.pc_id is null and v_cid is not null then
-        select array_agg(id) into v_cands from pcs where _cloud_id(agent_settings ->> 'cloud') = v_cid;
+        select array_agg(id) into v_cands from pcs where _cloud_id(agent_settings ->> 'cloud') = v_cid
+            and (v_ag.team_id is null or team_id = v_ag.team_id);
         if cardinality(v_cands) = 1
            and not exists (select 1 from agents where pc_id = v_cands[1])
            and not exists (select 1 from agents a where a.pc_id is null and a.user_id <> v_ag.user_id
                            and a.last_seen > now() - interval '10 minutes'
                            and _cloud_id(a.state -> 'cfg' ->> 'cloud') = v_cid) then
-            update agents set pc_id = v_cands[1] where user_id = v_ag.user_id;
+            update agents set pc_id = v_cands[1], team_id = _pc_team(v_cands[1]) where user_id = v_ag.user_id;
             v_ag.pc_id := v_cands[1];
             delete from pc_creds where pc_id = v_cands[1];
             perform _log('실행기 자동 연결', v_ag.machine || ' → ' || _pc_no_label(v_cands[1]) || ' (' || _cloud_name(v_cloud) || ')',
@@ -1214,7 +1249,8 @@ begin
         'pc_id', v_pc.id, 'pc_no', v_pc.no, 'pc_name', v_pc.name, 'ld_cloud', v_pc.ld_cloud,
         'settings', v_pc.agent_settings,
         'creds', coalesce((select string_agg(slot || ':' || fingerprint, ',' order by slot) from pc_creds where pc_id = v_pc.id), ''),
-        'command', case when v_cmd.id is null then null else jsonb_build_object('id', v_cmd.id, 'kind', v_cmd.kind) end);
+        'command', case when v_cmd.id is null then null
+                        else jsonb_build_object('id', v_cmd.id, 'kind', v_cmd.kind, 'arg', v_cmd.arg) end);
 end $$;
 
 -- 실행기: 명령 진행 상황/결과 적기 (p_log는 덧붙일 줄)
@@ -1240,6 +1276,11 @@ declare
 begin
     select * into v_ag from agents where user_id = p_agent for update;
     if not found then raise exception '없는 실행기예요. 새로고침하세요.'; end if;
+    -- 관리자는 자기 팀 실행기만 (팀이 안 정해진 실행기는 총관리자가 먼저 팀을 정함)
+    if not is_super() then
+        if v_ag.team_id is null then raise exception '이 실행기는 아직 팀이 없어요. 총관리자가 먼저 팀을 정해야 해요.'; end if;
+        if not is_team_admin(v_ag.team_id) then raise exception '다른 팀 실행기예요.'; end if;
+    end if;
     if v_ag.pc_id is not null and not is_team_admin(_pc_team(v_ag.pc_id)) then
         raise exception '이 실행기는 다른 팀 컴퓨터에 연결돼 있어요.';
     end if;
@@ -1248,12 +1289,13 @@ begin
         if v_team is null then raise exception '없는 컴퓨터예요.'; end if;
         if not is_team_admin(v_team) then raise exception '이 팀 관리자만 연결할 수 있어요.'; end if;
         update agents set pc_id = null where pc_id = p_pc and user_id <> p_agent;  -- 예전 실행기는 연결 끊음
-    elsif not is_admin() then
+    elsif not (is_super() or (coalesce(v_ag.team_id, _pc_team(v_ag.pc_id)) is not null
+                              and is_team_admin(coalesce(v_ag.team_id, _pc_team(v_ag.pc_id))))) then
         raise exception '관리자만 할 수 있어요.';
     end if;
     if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
     if p_pc is not null then delete from pc_creds where pc_id = p_pc; end if;
-    update agents set pc_id = p_pc where user_id = p_agent;
+    update agents set pc_id = p_pc, team_id = coalesce(v_team, team_id) where user_id = p_agent;
     -- 작업장 LD클라우드 칸은 실행기가 여는 클라우드만 보여준다: 떠나는 컴퓨터는 비우고, 새 컴퓨터는 그 실행기 값으로
     if v_ag.pc_id is not null and v_ag.pc_id is distinct from p_pc then
         update pcs set ld_cloud = '', updated_at = now() where id = v_ag.pc_id;
@@ -1281,12 +1323,28 @@ begin
     select * into v_ag from agents where user_id = p_agent;
     if not found then return; end if;
     if v_ag.pc_id is not null then raise exception '컴퓨터에 연결된 실행기는 먼저 연결을 끊으세요.'; end if;
-    if not is_admin() then raise exception '관리자만 할 수 있어요.'; end if;
+    if not (is_super() or (v_ag.team_id is not null and is_team_admin(v_ag.team_id))) then
+        raise exception '관리자만 할 수 있어요.';
+    end if;
     delete from agents where user_id = p_agent;
 end $$;
 
+-- 총관리자: 연결 대기 실행기의 팀 정하기 (자동으로 못 정한 경우)
+create or replace function public.set_agent_team(p_agent uuid, p_team bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_ag agents%rowtype;
+begin
+    if not is_super() then raise exception '총관리자만 할 수 있어요.'; end if;
+    select * into v_ag from agents where user_id = p_agent;
+    if not found then raise exception '없는 실행기예요. 새로고침하세요.'; end if;
+    if v_ag.pc_id is not null then raise exception '컴퓨터에 연결된 실행기는 팀을 바꿀 수 없어요. 먼저 연결을 끊으세요.'; end if;
+    update agents set team_id = p_team where user_id = p_agent;
+    perform _log('실행기 팀', v_ag.machine || ' → ' || coalesce(_team_name(p_team), '팀 없음'), p_team);
+end $$;
+
 -- PC 조종: 명령 보내기
-create or replace function public.send_pc_command(p_pc bigint, p_kind text) returns bigint
+drop function if exists public.send_pc_command(bigint, text);
+create or replace function public.send_pc_command(p_pc bigint, p_kind text, p_arg text default '') returns bigint
 language plpgsql security definer set search_path = public as $$
 declare v_id bigint;
 begin
@@ -1295,13 +1353,15 @@ begin
     if p_kind = 'stop' then
         update pc_commands set status = 'cancelled', finished_at = now(), result = '중지 요청으로 취소'
          where pc_id = p_pc and status = 'queued';
-    elsif exists (select 1 from pc_commands where pc_id = p_pc and status = 'queued' and kind = p_kind) then
+    elsif exists (select 1 from pc_commands where pc_id = p_pc and status = 'queued' and kind = p_kind
+                  and arg = coalesce(p_arg, '')) then
         raise exception '같은 명령이 이미 기다리고 있어요.';
     end if;
-    insert into pc_commands (pc_id, kind, created_by, created_name)
-    values (p_pc, p_kind, auth.uid(), coalesce((select display_name from profiles where id = auth.uid()), ''))
+    insert into pc_commands (pc_id, kind, arg, created_by, created_name)
+    values (p_pc, p_kind, coalesce(p_arg, ''), auth.uid(), coalesce((select display_name from profiles where id = auth.uid()), ''))
     returning id into v_id;
-    perform _log('PC 명령', _pc_no_label(p_pc) || ' ' || p_kind, _pc_team(p_pc));
+    perform _log('PC 명령', _pc_no_label(p_pc) || ' ' || p_kind || case when coalesce(p_arg, '') <> '' then ' (' || p_arg || ')' else '' end,
+                 _pc_team(p_pc));
     return v_id;
 end $$;
 
@@ -1334,6 +1394,10 @@ language sql stable security definer set search_path = public as $$
     select coalesce(jsonb_agg(jsonb_build_object('slot', slot, 'sealed', sealed, 'fingerprint', fingerprint) order by slot), '[]'::jsonb)
       from pc_creds where pc_id = _my_agent_pc() and my_role() = 'agent'
 $$;
+
+-- 연결된 실행기는 그 컴퓨터의 팀 (여러 번 실행해도 안전)
+update public.agents a set team_id = p.team_id from public.pcs p
+ where a.pc_id = p.id and a.team_id is distinct from p.team_id;
 
 -- 한 번만: 작업장 LD클라우드 칸을 엑셀 값 대신 실행기가 여는 클라우드로 바꾼다
 do $$
@@ -1386,6 +1450,7 @@ grant execute on function
     public.last_change(bigint), public.import_data(bigint, jsonb),
     public._my_agent_pc(), public._pc_team(bigint), public._can_control(bigint), public._cloud_id(text), public._cloud_name(text),
     public.agent_register(text, text, text), public.agent_sync(jsonb, jsonb), public.agent_report(bigint, text, text, text),
-    public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text),
+    public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text, text),
+    public.set_agent_team(uuid, bigint), public._agent_cloud_ids(jsonb, text),
     public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds()
 to authenticated;

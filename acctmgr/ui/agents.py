@@ -10,6 +10,7 @@ import re
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QMenu,
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
     QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import RepoError
-from ..models import AGENT_KINDS, COMMAND_STATUS, Agent
+from ..models import AGENT_KINDS, COMMAND_STATUS, GAMES, Agent
 from .common import T, button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
 
 COLS = ["", "번호", "컴퓨터", "실행기", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
@@ -133,6 +134,12 @@ def reset_pc_launcher(repo, pc, agent: Agent | None) -> None:
         repo.link_agent(agent.user_id, None)
 
 
+def kind_label(kind: str, arg: str = "") -> str:
+    """'AMP 실행' + 게임 → 'AMP 실행 (메랜)'"""
+    name = AGENT_KINDS.get(kind, kind)
+    return f"{name} ({arg})" if arg else name
+
+
 def _item(text: str, center: bool = False) -> QTableWidgetItem:
     it = QTableWidgetItem(text)
     it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -233,7 +240,31 @@ class AgentSettingsDialog(QDialog):
                 row.addWidget(self._path_label(cur.get(low + "_path", ""), "아직 없음 (한 번 실행하면 저장됨)"), 1)
                 row.addWidget(self._cmd_btn("폴더 열기", low + "_folder", "그 PC 화면에 폴더(탐색기)를 띄워요"))
                 row.addWidget(self._cmd_btn("지우기", low + "_clear", "지우면 다음 실행 때 그 PC에서 다시 찾아요"))
-                form.addRow(f"{key} 위치", row)
+                form.addRow(f"{key} 위치" + (" (구분 없음)" if key == "AMP" else ""), row)
+            # 게임별 AMP: 같은 PC에 메랜용/플래닛용 AMP가 따로 있을 때 어느 것을 켤지
+            found = [x for x in (cur.get("amp_found") or []) if x]
+            chosen = dict(cur.get("amp_paths") or {})
+            frow = QHBoxLayout()
+            frow.addWidget(muted(f"그 PC에서 찾은 AMP {len(found)}개" if found else "아직 안 찾음 → [AMP 모두 찾기]"), 1)
+            frow.addWidget(self._cmd_btn("AMP 모두 찾기", "amp_find", "그 PC에서 AMP.exe를 모두 찾아요 (1~2분). 끝나면 이 창을 다시 여세요"))
+            form.addRow("게임별 AMP", frow)
+            self.amp_games = {}
+            for g in GAMES:
+                c = QComboBox()
+                c.addItem("(정하지 않음)", "")
+                items = list(found)
+                if chosen.get(g) and chosen[g] not in items:
+                    items.append(chosen[g])
+                for x in items:
+                    c.addItem(x, x)
+                c.setCurrentIndex(max(c.findData(chosen.get(g, "")), 0))
+                wheel_only_when_focused(c)
+                self.amp_games[g] = c
+                grow = QHBoxLayout()
+                grow.addWidget(c, 1)
+                grow.addWidget(button("폴더 열기", "", lambda _=False, g=g: self._send("amp_folder", g),
+                                      "그 PC 화면에 이 게임 AMP 폴더를 띄워요"))
+                form.addRow(f"  {g} AMP", grow)
         self.cmd_msg = muted("")
 
         lay = QVBoxLayout(self)
@@ -298,9 +329,11 @@ class AgentSettingsDialog(QDialog):
         b.setEnabled(self.agent is not None)
         return b
 
-    def _send(self, kind: str) -> None:
-        if run_safely(self, self.repo.send_command, self.pc.id, kind):
-            self.cmd_msg.setText(f"[{AGENT_KINDS[kind]}] 명령을 보냈어요. 결과는 PC 조종 화면의 명령 기록에 나와요 "
+    def _send(self, kind: str, arg: str = "") -> None:
+        if self.agent is None:
+            return
+        if run_safely(self, self.repo.send_command, self.pc.id, kind, arg):
+            self.cmd_msg.setText(f"[{kind_label(kind, arg)}] 명령을 보냈어요. 결과는 PC 조종 화면의 명령 기록에 나와요 "
                                  "(위치 값은 몇 초 뒤 이 창을 다시 열면 바뀌어요).")
 
     def _before(self) -> list:
@@ -326,6 +359,9 @@ class AgentSettingsDialog(QDialog):
             v[key] = cb.isChecked()
         for key, e in self.hk.items():
             v[key] = e.text().strip()
+        games = getattr(self, "amp_games", None)
+        if games:
+            v["amp_paths"] = {g: c.currentData() or "" for g, c in games.items()}
         return v
 
     def _save(self) -> None:
@@ -341,6 +377,7 @@ class AgentSettingsDialog(QDialog):
     def _save_bulk(self) -> None:
         common = self.value()
         common.pop("cloud", None)  # 열 클라우드는 컴퓨터마다 다르므로 그대로 둠
+        common.pop("amp_paths", None)  # 게임별 AMP 위치도 컴퓨터마다 다름
         if QMessageBox.question(self, "같은 설정 적용", f"{len(self.bulk)}대에 같은 설정을 저장할까요?") != QMessageBox.Yes:
             return
         errors = []
@@ -532,7 +569,13 @@ class AgentsTab(QWidget):
         bar2 = QHBoxLayout()
         bar2.addSpacing(px(4))
         bar2.addWidget(muted("다른 프로그램:"))
-        for kind in ("amp_run", "amp_stop", "map_run", "map_stop"):
+        for kind in ("amp_run", "amp_stop"):
+            b = button(AGENT_KINDS[kind], "", None, "어느 게임의 AMP인지 골라요 (실행기 [설정]에서 게임별 AMP를 정해 둬야 해요)")
+            m = QMenu(b)
+            m.aboutToShow.connect(lambda k=kind, menu=m: self._fill_amp_menu(k, menu))   # 팀마다 게임이 달라서 열 때마다 채움
+            b.setMenu(m)
+            bar2.addWidget(b)
+        for kind in ("map_run", "map_stop"):
             bar2.addWidget(button(AGENT_KINDS[kind], "", lambda _=False, k=kind: self._send_checked(k)))
         bar2.addSpacing(px(16))
         bar2.addWidget(muted("실행기:"))
@@ -587,9 +630,10 @@ class AgentsTab(QWidget):
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
         pl.addWidget(QLabel("<b>연결 대기 실행기</b> — 새로 설치되거나 업데이트된 실행기예요. 어느 컴퓨터인지 골라 [연결]을 누르세요."))
-        self.pend = QTableWidget(0, 6)
+        self.pend = QTableWidget(0, 7)
         self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "그 PC가 여는 클라우드", "마지막 연락",
-                                             "연결할 컴퓨터 (눌러서 고르기)", ""])
+                                             "연결할 컴퓨터 (눌러서 고르기)", "", "팀"])
+        self.pend.setColumnHidden(6, not repo.me.is_super)
         self.pend.verticalHeader().setVisible(False)
         style_table(self.pend)
         self.pend.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -651,7 +695,9 @@ class AgentsTab(QWidget):
             return
         mine = {p.id for p in self.pcs}
         self.agents = {a.pc_id: a for a in agents if a.pc_id in mine}
-        self.pending = [a for a in agents if a.pc_id is None]
+        tid = getattr(self.repo, "team_id", None)
+        self.pending = [a for a in agents if a.pc_id is None
+                        and (a.team_id == tid or (a.team_id is None and self.repo.me.is_super))]
         self.commands = {}
         for c in cmds:
             self.commands.setdefault(c["pc_id"], []).append(c)
@@ -703,7 +749,7 @@ class AgentsTab(QWidget):
                 t.setItem(r, c, _item(self.acc_names.get(aid, "") if aid else "-"))
             last = (self.commands.get(pc.id) or [None])[0]
             if last:
-                kind = _item(f"{AGENT_KINDS.get(last['kind'], last['kind'])} · {COMMAND_STATUS.get(last['status'], '')}")
+                kind = _item(f"{kind_label(last['kind'], last.get('arg', ''))} · {COMMAND_STATUS.get(last['status'], '')}")
                 kind.setToolTip(f"{last['created_at']} {last.get('created_name', '')}")
                 if last["status"] == "failed":
                     kind.setForeground(red)
@@ -736,7 +782,7 @@ class AgentsTab(QWidget):
         self.hist.verticalHeader().setDefaultSectionSize(px(30))
         fit_columns(self.hist, mins={0: 120}, caps={5: 420})
         self.pend.verticalHeader().setDefaultSectionSize(px(40))
-        fit_columns(self.pend, mins={4: 300}, caps={2: 280})
+        fit_columns(self.pend, mins={4: 300, 6: 110}, caps={2: 280})
 
     def _toggle(self, pc_id: int, on: bool) -> None:
         (self.checked.add if on else self.checked.discard)(pc_id)
@@ -753,7 +799,15 @@ class AgentsTab(QWidget):
             self._render_history()
 
     # ---------------------------------------------------------------- 명령
-    def _send_checked(self, kind: str) -> None:
+    def _fill_amp_menu(self, kind: str, m: QMenu) -> None:
+        m.clear()
+        for g in GAMES:
+            m.addAction(f"{g} AMP", lambda g=g: self._send_checked(kind, g))
+        m.addSeparator()
+        m.addAction("게임 구분 없이 (AMP가 하나뿐일 때)" if kind == "amp_run" else "모든 AMP",
+                    lambda: self._send_checked(kind, ""))
+
+    def _send_checked(self, kind: str, arg: str = "") -> None:
         targets = [p for p in self.pcs if p.id in self.checked]
         if not targets and self.current_pc:
             targets = [p for p in self.pcs if p.id == self.current_pc]
@@ -766,7 +820,7 @@ class AgentsTab(QWidget):
             QMessageBox.warning(self, "PC 조종", "고른 컴퓨터에 연결된 실행기가 없어요.")
             return
         if len(targets) > 1 and QMessageBox.question(
-                self, "PC 조종", f"{len(targets)}대에 [{AGENT_KINDS[kind]}] 명령을 보낼까요?") != QMessageBox.Yes:
+                self, "PC 조종", f"{len(targets)}대에 [{kind_label(kind, arg)}] 명령을 보낼까요?") != QMessageBox.Yes:
             return
         errors = []
         try:
@@ -775,7 +829,7 @@ class AgentsTab(QWidget):
             pass
         for p in targets:
             try:
-                self.repo.send_command(p.id, kind)
+                self.repo.send_command(p.id, kind, arg)
             except RepoError as e:
                 errors.append(f"{p.no}. {p.name}: {e}")
         errors += [f"{p.no}. {p.name}: 연결된 실행기가 없음" for p in no_agent]
@@ -850,7 +904,7 @@ class AgentsTab(QWidget):
         self.hist.blockSignals(True)
         self.hist.setRowCount(len(rows))
         for r, c in enumerate(rows):
-            vals = [c["created_at"], AGENT_KINDS.get(c["kind"], c["kind"]), c.get("created_name", ""),
+            vals = [c["created_at"], kind_label(c["kind"], c.get("arg", "")), c.get("created_name", ""),
                     COMMAND_STATUS.get(c["status"], c["status"]), _took(c), c.get("result", "")]
             for k, v in enumerate(vals):
                 it = _item(v)
@@ -924,6 +978,16 @@ class AgentsTab(QWidget):
             l.addWidget(button("지우기", "", lambda _=False, a=ag: self._forget(a), "잘못 등록된 실행기를 목록에서 지워요"))
             l.addStretch(1)
             self.pend.setCellWidget(r, 5, w)
+            if self.repo.me.is_super:
+                tc = QComboBox()
+                tc.addItem("(팀 정하기)", None)
+                for t in self.repo.teams:
+                    tc.addItem(t.name, t.id)
+                tc.setCurrentIndex(max(tc.findData(ag.team_id), 0) if ag.team_id is not None else 0)
+                tc.setToolTip("이 실행기가 어느 팀 PC인지. 정하면 그 팀 관리자에게도 보여요 (LD 목록으로 자동으로 못 정했을 때)")
+                wheel_only_when_focused(tc)
+                tc.activated.connect(lambda _i, a=ag, c=tc: self._set_team(a, c.currentData()))
+                self.pend.setCellWidget(r, 6, tc)
         self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
 
     def _picking(self) -> bool:
@@ -991,6 +1055,14 @@ class AgentsTab(QWidget):
             self._redraw_pending()
             pc = next((p for p in self.pcs if p.id == pid), None)
             self._say(f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요.")
+
+    def _set_team(self, ag: Agent, team_id) -> None:
+        if team_id is None or team_id == ag.team_id:
+            return
+        if run_safely(self, self.repo.set_agent_team, ag.user_id, team_id):
+            name = next((t.name for t in self.repo.teams if t.id == team_id), "")
+            self._say(f"{ag.machine} → {name} 실행기로 정했어요" + ("" if team_id == self.repo.team_id else " (그 팀을 고르면 보여요)"))
+            self._redraw_pending()
 
     def _forget(self, ag: Agent) -> None:
         if QMessageBox.question(self, "지우기", f"'{ag.machine}' 실행기를 목록에서 지울까요?\n"

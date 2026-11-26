@@ -329,7 +329,7 @@ AGENT_KINDS = {"start": "시작", "restart": "재시작", "close": "종료", "lo
                "stop": "중지", "amp_run": "AMP 실행", "amp_stop": "AMP 종료", "map_run": "MAP 실행",
                "map_stop": "MAP 종료", "amp_folder": "AMP 폴더 열기", "map_folder": "MAP 폴더 열기",
                "amp_clear": "AMP 경로 지우기", "map_clear": "MAP 경로 지우기", "reload_devices": "기기 목록 다시 읽기",
-               "find_ld": "LD CLOUD 위치 찾기", "restart_agent": "실행기 다시 켜기"}
+               "find_ld": "LD CLOUD 위치 찾기", "restart_agent": "실행기 다시 켜기", "amp_find": "AMP 모두 찾기"}
 COMMAND_STATUS = {"queued": "기다리는 중", "running": "실행 중", "done": "완료", "failed": "실패", "cancelled": "취소됨"}
 ONLINE_SECONDS = 90  # 마지막 연락이 이보다 오래되면 꺼진 것으로 본다
 
@@ -338,6 +338,7 @@ ONLINE_SECONDS = 90  # 마지막 연락이 이보다 오래되면 꺼진 것으�
 class Agent:
     user_id: str
     pc_id: int | None = None
+    team_id: int | None = None    # 이 실행기가 속한 팀 (연결 대기를 팀별로)
     machine: str = ""
     version: str = ""
     public_key: str = ""
