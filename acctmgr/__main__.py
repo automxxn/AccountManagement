@@ -11,8 +11,18 @@ from .ui.main_window import MainWindow
 from .ui.update_ui import startup_check
 
 
+def _set_app_id() -> None:
+    """작업표시줄에 프로그램 아이콘이 나오도록 Windows 앱 ID를 정한다 (창을 만들기 전에 호출)."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AccountManagement.App")
+    except Exception:
+        pass
+
+
 def main() -> None:
     logsetup.setup()
+    _set_app_id()
     logsetup.log.info("시작 v%s", __version__)
     app = QApplication(sys.argv)
     app.setApplicationName("AccountManagement")

@@ -5,13 +5,26 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-GAMES = ("메랜", "플래닛")
+# 게임 종류: 관리자가 추가할 수 있다. 같은 리스트 객체를 고쳐서(set_games) 모든 화면이 같이 바뀌게 한다.
+DEFAULT_GAMES = ("메랜", "플래닛")
+GAMES: list[str] = list(DEFAULT_GAMES)
 PROVIDERS = ("넥슨", "구글", "네이버")
 
+# 계정 상태 5가지
 STATUS_AVAILABLE = "사용가능"
 STATUS_IN_USE = "사용중"
-STATUS_BANNED = "정지"
+STATUS_BANNED = "정지"        # 모든 게임이 정지
+STATUS_AUTH = "인증불가"       # 아이디/비번은 있지만 인증을 못 해서 못 씀 (탈퇴처럼 취급, 풀리면 다시 사용)
 STATUS_WITHDRAWN = "탈퇴"
+
+
+def set_games(games: list[str]) -> None:
+    """게임 목록을 바꾼다 (메랜/플래닛은 항상 맨 앞에 남김)."""
+    clean = []
+    for g in list(DEFAULT_GAMES) + [x.strip() for x in games]:
+        if g and g not in clean:
+            clean.append(g)
+    GAMES[:] = clean
 
 
 def norm_login(login_id: str) -> str:
@@ -106,7 +119,9 @@ class Account:
     tag: str = ""  # 메월코드
     mr_ban: Ban = field(default_factory=Ban)
     pl_ban: Ban = field(default_factory=Ban)
+    extra_bans: dict = field(default_factory=dict)  # 추가한 게임의 정지 {게임: Ban}
     withdrawn: bool = False
+    auth_blocked: bool = False  # 인증불가
     note: str = ""
     characters: list[Character] = field(default_factory=list)
     version: int = 0
@@ -124,9 +139,28 @@ class Account:
         return cs[0] if cs else None
 
     def set_chars(self, game: str, chars: list[Character]) -> None:
-        """그 게임의 캐릭터를 통째로 바꾼다 (chars[0]이 대표)."""
-        others = [c for c in self.characters if c.game != game]
-        self.characters = (others + chars) if game == "플래닛" else (chars + others)
+        """그 게임의 캐릭터를 통째로 바꾼다 (chars[0]이 대표). 저장 순서는 게임 목록 순서."""
+        by_game = {g: [c for c in self.characters if c.game == g] for g in {c.game for c in self.characters}}
+        by_game[game] = list(chars)
+        order = list(GAMES) + [g for g in by_game if g not in GAMES]
+        self.characters = [c for g in order for c in by_game.get(g, [])]
+
+    def ban(self, game: str) -> Ban:
+        if game == "메랜":
+            return self.mr_ban
+        if game == "플래닛":
+            return self.pl_ban
+        return self.extra_bans.get(game) or Ban()
+
+    def set_ban(self, game: str, ban: Ban) -> None:
+        if game == "메랜":
+            self.mr_ban = ban
+        elif game == "플래닛":
+            self.pl_ban = ban
+        elif ban.banned:
+            self.extra_bans[game] = ban
+        else:
+            self.extra_bans.pop(game, None)
 
     def char_summary(self, game: str) -> str:
         cs = self.chars(game)
@@ -145,21 +179,25 @@ class Account:
         return "  ".join(parts)
 
     def ban_labels(self) -> list[str]:
-        out = []
-        for game, ban in (("메랜", self.mr_ban), ("플래닛", self.pl_ban)):
-            lab = ban.label(game)
-            if lab:
-                out.append(lab)
-        return out
+        return [lab for g in GAMES if (lab := self.ban(g).label(g))]
+
+    @property
+    def all_banned(self) -> bool:
+        """모든 게임이 정지 (게임이 추가되고 그 게임은 정지가 아니면 False)."""
+        return bool(GAMES) and all(self.ban(g).active() for g in GAMES)
+
+    both_banned = all_banned  # 예전 이름
 
     @property
     def status(self) -> str:
-        """작업장 기준 상태: 자리에 들어 있으면 사용중, 아니면 사용가능."""
+        """계정 상태 5가지: 탈퇴 / 인증불가 / 정지(모든 게임) / 사용중 / 사용가능."""
+        if self.withdrawn:
+            return STATUS_WITHDRAWN
+        if self.auth_blocked:
+            return STATUS_AUTH
+        if self.all_banned:
+            return STATUS_BANNED
         return STATUS_IN_USE if self.location else STATUS_AVAILABLE
-
-    @property
-    def both_banned(self) -> bool:
-        return self.mr_ban.active() and self.pl_ban.active()
 
     @property
     def delete_requested(self) -> bool:
@@ -167,8 +205,9 @@ class Account:
 
     @property
     def assignable(self) -> bool:
-        """빈 자리에 넣을 수 있는지 (자리에 없고, 탈퇴하지 않았고, 삭제 요청 중이 아님)."""
-        return not self.location and not self.withdrawn and not self.delete_requested
+        """빈 자리에 넣을 수 있는지: 자리에 없고, 탈퇴/인증불가/모든 게임 정지/삭제 요청이 아님."""
+        return (not self.location and not self.withdrawn and not self.auth_blocked
+                and not self.all_banned and not self.delete_requested)
 
     @property
     def owner_key(self) -> str:

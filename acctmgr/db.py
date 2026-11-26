@@ -5,12 +5,25 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from .models import PC, Account, Ban, Character, Location, Profile, norm_login, owner_rule_violation
+from .models import (
+    DEFAULT_GAMES, PC, Account, Ban, Character, Location, Profile, norm_login, owner_rule_violation,
+)
+
+
+def bans_to_json(bans: dict) -> str:
+    return json.dumps({g: {"banned": b.banned, "until": b.until} for g, b in bans.items() if b.banned},
+                      ensure_ascii=False)
+
+
+def bans_from_json(raw) -> dict:
+    data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    return {g: Ban(bool(v.get("banned")), v.get("until") or "") for g, v in data.items()}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -112,6 +125,15 @@ class Repository:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        # 나중에 생긴 칸 (예전 DB 파일에도 붙인다)
+        for sql in ("ALTER TABLE accounts ADD COLUMN auth_blocked INTEGER NOT NULL DEFAULT 0",
+                    "ALTER TABLE accounts ADD COLUMN other_bans TEXT NOT NULL DEFAULT '{}'",
+                    "CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"):
+            try:
+                self.conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass
+        self.conn.commit()
 
     # ------------------------------------------------------------------ 기록
     def _log(self, action: str, detail: str = "") -> None:
@@ -133,6 +155,7 @@ class Repository:
             mr_ban=Ban(bool(r["mr_banned"]), r["mr_until"]),
             pl_ban=Ban(bool(r["pl_banned"]), r["pl_until"]),
             withdrawn=bool(r["withdrawn"]), note=r["note"], version=r["version"],
+            auth_blocked=bool(r["auth_blocked"]), extra_bans=bans_from_json(r["other_bans"]),
         )
 
     def list_accounts(self) -> list[Account]:
@@ -172,14 +195,14 @@ class Repository:
             acc.owner.strip(), acc.contact.strip(), acc.provider.strip(), acc.login_id.strip(),
             norm_login(acc.login_id), acc.password, acc.tag.strip(),
             int(acc.mr_ban.banned), acc.mr_ban.until, int(acc.pl_ban.banned), acc.pl_ban.until,
-            int(acc.withdrawn), acc.note, _now(),
+            int(acc.withdrawn), acc.note, _now(), int(acc.auth_blocked), bans_to_json(acc.extra_bans),
         )
         with self.conn:
             if acc.id is None:
                 cur = self.conn.execute(
                     """INSERT INTO accounts(owner, contact, provider, login_id, login_key, password, tag,
-                       mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
+                       mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, updated_at, auth_blocked, other_bans)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
                 acc.id = cur.lastrowid
                 acc.version = 1
                 action = "계정 추가"
@@ -187,7 +210,7 @@ class Repository:
                 cur = self.conn.execute(
                     """UPDATE accounts SET owner=?, contact=?, provider=?, login_id=?, login_key=?, password=?, tag=?,
                        mr_banned=?, mr_until=?, pl_banned=?, pl_until=?, withdrawn=?, note=?, updated_at=?,
-                       version = version + 1
+                       auth_blocked=?, other_bans=?, version = version + 1
                        WHERE id=? AND version=?""", vals + (acc.id, acc.version))
                 if cur.rowcount == 0:
                     raise ConflictError("다른 사람이 먼저 이 계정을 수정했어요. 최신 내용을 다시 불러온 뒤 수정하세요.")
@@ -199,8 +222,8 @@ class Repository:
                     self.conn.execute(
                         "INSERT INTO characters(account_id, game, nickname, level_job, sort) VALUES (?,?,?,?,?)",
                         (acc.id, c.game, c.nickname.strip(), c.level_job.strip(), i))
-            if acc.withdrawn:
-                # 탈퇴 계정은 자리에서 자동으로 뺀다
+            if acc.withdrawn or acc.auth_blocked:
+                # 탈퇴/인증불가 계정은 자리에서 자동으로 뺀다
                 self.conn.execute("DELETE FROM assignments WHERE account_id=?", (acc.id,))
             if log:
                 self._log(action, f"[{acc.provider}] {acc.login_id.strip()} ({acc.owner})")
@@ -285,11 +308,13 @@ class Repository:
         pc = self.conn.execute("SELECT slot_count FROM pcs WHERE id=?", (pc_id,)).fetchone()
         if not pc or not (1 <= slot <= pc["slot_count"]):
             raise RepoError("없는 자리예요. 새로고침 후 다시 시도하세요.")
-        acc = self.conn.execute("SELECT withdrawn FROM accounts WHERE id=?", (account_id,)).fetchone()
+        acc = self.conn.execute("SELECT withdrawn, auth_blocked FROM accounts WHERE id=?", (account_id,)).fetchone()
         if not acc:
             raise RepoError("없는 계정이에요. 새로고침 후 다시 시도하세요.")
         if acc["withdrawn"]:
             raise RepoError("탈퇴한 계정은 넣을 수 없어요.")
+        if acc["auth_blocked"]:
+            raise RepoError("인증불가 계정은 넣을 수 없어요.")
         where = self.conn.execute("SELECT pc_id, slot FROM assignments WHERE account_id=?", (account_id,)).fetchone()
         if where:
             raise RepoError(f"이 계정은 이미 {self._pc_label(where['pc_id'], where['slot'])}에 들어 있어요.")
@@ -343,6 +368,16 @@ class Repository:
 
     def reject_delete(self, account_id: int) -> None:
         pass
+
+    def list_games(self) -> list[str]:
+        r = self.conn.execute("SELECT value FROM app_settings WHERE key='games'").fetchone()
+        return json.loads(r["value"]) if r else list(DEFAULT_GAMES)
+
+    def save_games(self, games: list[str]) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO app_settings(key, value) VALUES ('games', ?)",
+                              (json.dumps(games, ensure_ascii=False),))
+            self._log("게임 종류 변경", ", ".join(games))
 
     def last_change(self) -> int:
         return self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM audit_log").fetchone()[0]

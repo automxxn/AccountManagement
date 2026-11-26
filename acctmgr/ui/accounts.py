@@ -5,23 +5,90 @@ from collections import Counter
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QAbstractItemView, QButtonGroup, QDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..db import Repository
-from ..models import STATUS_AVAILABLE, STATUS_IN_USE, Account, norm_login
+from ..models import (
+    DEFAULT_GAMES, GAMES, set_games, STATUS_AUTH, STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login,
+)
 from .common import button, copy_text, muted, page_header, px, run_safely, style_table
 from .dialogs import AccountDialog, CharacterDialog
-from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells
+from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells, rebuild_columns
 
 COLUMNS = ACCOUNT_COLUMNS
 CHAR_COLS = ACC_CHAR     # 누르면 캐릭터 창
-FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심", "삭제 요청"]
+
+
+def filter_names() -> list[str]:
+    """필터 버튼: 상태 5가지 + 게임별 정지 + 중복 의심 + 삭제 요청 (게임 목록에 따라 바뀜)"""
+    return (["전체", STATUS_AVAILABLE, STATUS_IN_USE, STATUS_BANNED, STATUS_AUTH, STATUS_WITHDRAWN]
+            + [f"{g}정지" for g in GAMES] + ["중복 의심", "삭제 요청"])
+
+
+class GamesDialog(QDialog):
+    """게임 종류 관리: 추가하면 계정 표에 '○○닉', '○○ 레벨/직업', '○○정지' 열이 생긴다."""
+
+    def __init__(self, games: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("게임 종류 관리")
+        self.resize(px(420), px(380))
+        self.games = list(games)
+        self.list = QListWidget()
+        self.list.setObjectName("pickList")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(20), px(16), px(20), px(16))
+        hint = QLabel("게임을 추가하면 계정 표에 닉, 레벨/직업, 정지 열이 생기고, 작업장의 초록불/빨간불도 늘어나요.\n"
+                      "메랜과 플래닛은 지울 수 없어요. 지운 게임의 캐릭터와 정지 정보는 지워지지 않고 숨겨지기만 해요.")
+        hint.setWordWrap(True)
+        hint.setObjectName("help")
+        lay.addWidget(hint)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        row.addWidget(button("+ 게임 추가", "", self._add))
+        row.addWidget(button("선택한 게임 빼기", "danger", self._remove))
+        row.addStretch(1)
+        row.addWidget(button("저장", "primary", self.accept))
+        row.addWidget(button("취소", "", self.reject))
+        lay.addLayout(row)
+        self._fill()
+
+    def _fill(self) -> None:
+        self.list.clear()
+        for g in self.games:
+            self.list.addItem(g + ("  (기본)" if g in DEFAULT_GAMES else ""))
+
+    def _add(self) -> None:
+        name, ok = QInputDialog.getText(self, "게임 추가", "게임 이름 (예: 아르테일)")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in self.games:
+            QMessageBox.information(self, "게임 추가", "이미 있는 게임이에요.")
+            return
+        self.games.append(name)
+        self._fill()
+
+    def _remove(self) -> None:
+        r = self.list.currentRow()
+        if r < 0:
+            return
+        g = self.games[r]
+        if g in DEFAULT_GAMES:
+            QMessageBox.information(self, "게임 빼기", "메랜과 플래닛은 뺄 수 없어요.")
+            return
+        if QMessageBox.question(self, "게임 빼기",
+                                f"'{g}' 열을 계정 표에서 뺄까요?\n캐릭터와 정지 정보는 지워지지 않고, 다시 추가하면 보여요.") \
+                == QMessageBox.Yes:
+            self.games.pop(r)
+            self._fill()
 
 
 class AccountsTab(QWidget):
     changed = Signal()
+    games_changed_signal = Signal()
 
     def __init__(self, repo: Repository):
         super().__init__()
@@ -32,6 +99,8 @@ class AccountsTab(QWidget):
         me = repo.me
 
         right = []
+        if me.is_admin:
+            right.append(button("게임 종류 관리", "", self._manage_games, "게임을 추가하면 닉/레벨직업/정지 열이 생겨요"))
         if me.can("can_add_account"):
             right.append(button("+ 계정 추가", "primary", self._add))
         header = page_header("계정", "가지고 있는 모든 계정과 지금 어디에 들어 있는지 보여줘요", right)
@@ -44,18 +113,15 @@ class AccountsTab(QWidget):
         self.req_banner.mousePressEvent = lambda e: self.filter_btns["삭제 요청"].click()
 
         self.filter_group = QButtonGroup(self)
+        self.filter_group.idClicked.connect(lambda _: self._render())
         self.filter_btns: dict[str, QPushButton] = {}
+        self.filters: list[str] = []
         frow = QHBoxLayout()
         frow.setSpacing(6)
-        for i, name in enumerate(FILTERS):
-            b = button(name, "chip")
-            b.setCheckable(True)
-            if i == 0:
-                b.setChecked(True)
-            self.filter_group.addButton(b, i)
-            self.filter_btns[name] = b
-            frow.addWidget(b)
-        self.filter_group.idClicked.connect(lambda _: self._render())
+        self.chip_row = QHBoxLayout()
+        self.chip_row.setSpacing(6)
+        frow.addLayout(self.chip_row)
+        self._build_filters()
         frow.addStretch(1)
         self.search = QLineEdit()
         self.search.setPlaceholderText("명의자, 아이디, 닉네임, 비고로 찾기")
@@ -128,22 +194,60 @@ class AccountsTab(QWidget):
     def restyle(self) -> None:
         self.nav.apply()
 
+    def _build_filters(self) -> None:
+        """필터 버튼을 (다시) 만든다. 게임이 추가되면 '○○정지' 버튼이 생긴다."""
+        current = self.filters[self.filter_group.checkedId()] if self.filters and self.filter_group.checkedId() >= 0 else "전체"
+        for b in list(self.filter_btns.values()):
+            self.filter_group.removeButton(b)
+            b.setParent(None)
+            b.deleteLater()
+        self.filter_btns.clear()
+        self.filters = filter_names()
+        for i, name in enumerate(self.filters):
+            b = button(name, "chip")
+            b.setCheckable(True)
+            self.filter_group.addButton(b, i)
+            self.filter_btns[name] = b
+            self.chip_row.addWidget(b)
+        (self.filter_btns.get(current) or self.filter_btns["전체"]).setChecked(True)
+
+    def games_changed(self) -> None:
+        """게임 목록이 바뀌었을 때: 필터 버튼과 표 열을 다시 만든다."""
+        self._build_filters()
+        self.refresh()
+
+    def _tests(self) -> dict:
+        t = {
+            "전체": lambda a: True,
+            STATUS_AVAILABLE: lambda a: a.assignable,
+            STATUS_IN_USE: lambda a: bool(a.location),
+            STATUS_BANNED: lambda a: a.status == STATUS_BANNED,
+            STATUS_AUTH: lambda a: a.auth_blocked,
+            STATUS_WITHDRAWN: lambda a: a.withdrawn,
+            "중복 의심": lambda a: a.id in self.dups,
+            "삭제 요청": lambda a: a.delete_requested,
+        }
+        for g in GAMES:
+            t[f"{g}정지"] = lambda a, g=g: a.ban(g).active()
+        return t
+
+    def _manage_games(self) -> None:
+        dlg = GamesDialog(list(GAMES), self)
+        if not dlg.exec() or dlg.games == list(GAMES):
+            return
+        if run_safely(self, self.repo.save_games, dlg.games):
+            set_games(dlg.games)
+            rebuild_columns()
+            self.games_changed_signal.emit()
+
     def refresh(self) -> None:
         self.accs = self.repo.list_accounts()
         if self.show_worker:
             self.worker_names = {w.id: w.display_name for w in self.repo.list_workers()}
         keys = Counter(norm_login(a.login_id) for a in self.accs)
         self.dups = {a.id for a in self.accs if keys[norm_login(a.login_id)] > 1}
-        n = {
-            "전체": len(self.accs),
-            STATUS_AVAILABLE: sum(1 for a in self.accs if a.assignable),
-            STATUS_IN_USE: sum(1 for a in self.accs if a.location),
-            "메랜정지": sum(1 for a in self.accs if a.mr_ban.active()),
-            "플래닛정지": sum(1 for a in self.accs if a.pl_ban.active()),
-            "탈퇴": sum(1 for a in self.accs if a.withdrawn),
-            "중복 의심": len(self.dups),
-            "삭제 요청": sum(1 for a in self.accs if a.delete_requested),
-        }
+        tests = self._tests()
+        n = {name: sum(1 for a in self.accs if tests[name](a)) for name in self.filters}
         self.filter_btns["삭제 요청"].setVisible(self.repo.me.is_admin and self.repo.is_cloud)
         req = n["삭제 요청"]
         self.req_banner.setVisible(bool(req) and self.repo.me.is_admin)
@@ -154,25 +258,23 @@ class AccountsTab(QWidget):
         self._render()
 
     def _visible(self) -> list[Account]:
-        f = FILTERS[self.filter_group.checkedId()]
+        idx = self.filter_group.checkedId()
+        f = self.filters[idx] if 0 <= idx < len(self.filters) else "전체"
         q = self.search.text().strip().lower()
-        test = {
-            STATUS_AVAILABLE: lambda a: a.assignable,
-            STATUS_IN_USE: lambda a: bool(a.location),
-            "메랜정지": lambda a: a.mr_ban.active(),
-            "플래닛정지": lambda a: a.pl_ban.active(),
-            "탈퇴": lambda a: a.withdrawn,
-            "중복 의심": lambda a: a.id in self.dups,
-            "삭제 요청": lambda a: a.delete_requested,
-        }.get(f, lambda a: True)
+        test = self._tests().get(f, lambda a: True)
         out = [a for a in self.accs if test(a) and (not q or q in a.search_text())]
-        # 사용중 → 사용가능 → 탈퇴 순, 그 안에서는 명의자순
-        out.sort(key=lambda a: (0 if a.location else (2 if a.withdrawn else 1), a.owner, a.login_id))
+        # 사용중 → 사용가능 → 정지 → 인증불가 → 탈퇴 순, 그 안에서는 명의자순
+        order = {STATUS_IN_USE: 0, STATUS_AVAILABLE: 1, STATUS_BANNED: 2, STATUS_AUTH: 3, STATUS_WITHDRAWN: 4}
+        out.sort(key=lambda a: (order.get(a.status, 9), a.owner, a.login_id))
         return out
 
     def _render(self) -> None:
         rows = self._visible()
         self.table.setSortingEnabled(False)
+        if self.table.columnCount() != len(ACCOUNT_COLUMNS) or \
+                self.table.horizontalHeaderItem(len(ACCOUNT_COLUMNS) - 1).text() != ACCOUNT_COLUMNS[-1]:
+            self.table.setColumnCount(len(ACCOUNT_COLUMNS))
+        self.table.setHorizontalHeaderLabels(ACCOUNT_COLUMNS)
         self.table.setRowCount(len(rows))
         bold = self.nav.bold_font()
         for r, a in enumerate(rows):

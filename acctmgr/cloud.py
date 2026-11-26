@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from .crypto import Cipher, derive_key, new_salt
-from .db import ConflictError, RepoError
-from .models import PC, Account, Ban, Character, Location, Profile
+from .db import ConflictError, RepoError, bans_from_json, bans_to_json
+from .models import DEFAULT_GAMES, PC, Account, Ban, Character, Location, Profile
 
 LOGIN_DOMAIN = "acctmgr.app"
 
@@ -192,6 +194,7 @@ class CloudRepository:
             "mr_banned": a.mr_ban.banned, "mr_until": a.mr_ban.until,
             "pl_banned": a.pl_ban.banned, "pl_until": a.pl_ban.until,
             "withdrawn": a.withdrawn, "note": a.note, "worker_id": a.worker_id or "",
+            "auth_blocked": a.auth_blocked, "other_bans": json.loads(bans_to_json(a.extra_bans)),
             "characters": [{"game": c.game, "nickname": c.nickname, "level_job": c.level_job}
                            for c in a.characters if c.text()],
         }
@@ -226,6 +229,7 @@ class CloudRepository:
                 pl_ban=Ban(r["pl_banned"], r["pl_until"]), withdrawn=r["withdrawn"], note=r["note"],
                 version=r["version"], worker_id=r["worker_id"],
                 delete_requested_at=(r.get("delete_requested_at") or "")[:16].replace("T", " "),
+                auth_blocked=r.get("auth_blocked", False), extra_bans=bans_from_json(r.get("other_bans")),
                 delete_requested_by=r.get("delete_requested_by"),
                 characters=[Character(c["game"], c["nickname"], c["level_job"], c["id"]) for c in chars])
         pcs = {r["id"]: r for r in self._get("pcs", {"select": "id,no,name"})}
@@ -246,6 +250,16 @@ class CloudRepository:
 
     def list_workers(self) -> list[Profile]:
         return [self._profile(r) for r in self._get("profiles", {"select": "*", "order": "created_at"})]
+
+    def list_games(self) -> list[str]:
+        rows = self._get("app_settings", {"select": "value", "key": "eq.games"})
+        try:
+            return json.loads(rows[0]["value"]) if rows else list(DEFAULT_GAMES)
+        except (ValueError, KeyError):
+            return list(DEFAULT_GAMES)
+
+    def save_games(self, games: list[str]) -> None:
+        self._rpc("set_games", {"p": games})
 
     def last_change(self) -> int:
         return int(self._rpc("last_change", {}) or 0)

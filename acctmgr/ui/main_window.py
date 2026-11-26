@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from .. import logsetup
 from ..db import Repository, RepoError
 from ..importer import import_workbook, snapshot
-from ..models import ROLES
+from ..models import GAMES, ROLES, set_games
 from ..version import __version__
 from .accounts import AccountsTab
 from .common import (
@@ -20,6 +20,7 @@ from .common import (
 from .connect import ConnectionDialog, clear_auto_login, settings
 from .update_ui import manual_check
 from .workers import WorkersTab
+from .sheet import rebuild_columns
 from .workplace import WorkplaceTab
 
 POLL_MS = 8000
@@ -71,6 +72,9 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.resize(1480, 900)
 
+        # 게임 종류 불러오기 (계정 표의 게임별 열이 여기에 맞춰 만들어짐)
+        self._load_games()
+
         # 페이지
         self.work = WorkplaceTab(repo)
         self.accounts = AccountsTab(repo)
@@ -91,6 +95,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(w)
         self.work.changed.connect(self._after_change)
         self.accounts.changed.connect(self._after_change)
+        self.accounts.games_changed_signal.connect(self._games_changed)
 
         central = QWidget()
         h = QHBoxLayout(central)
@@ -243,7 +248,26 @@ class MainWindow(QMainWindow):
             logsetup.log.warning("새로고침 실패: %s", e)
             self.statusBar().showMessage(f"새로고침 실패: {e}", 10000)
 
+    def _load_games(self) -> bool:
+        """서버(또는 이 PC)의 게임 목록을 읽어 적용. 바뀌었으면 True."""
+        try:
+            games = self.repo.list_games()
+        except RepoError:
+            return False
+        before = list(GAMES)
+        set_games(games)
+        rebuild_columns()
+        return list(GAMES) != before
+
+    def _games_changed(self) -> None:
+        self.accounts.games_changed()
+        self.work.games_changed()
+        self._after_change()
+
     def refresh_all(self) -> None:
+        if self._load_games():  # 다른 PC에서 관리자가 게임을 추가한 경우
+            self.accounts._build_filters()
+
         def go():
             for _, t in self.pages:
                 t.refresh()

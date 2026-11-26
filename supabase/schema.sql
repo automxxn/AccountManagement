@@ -59,6 +59,11 @@ create table if not exists public.accounts (
     unique (provider, login_key)
 );
 
+-- 인증불가: 아이디/비번은 있지만 인증을 못 해서 쓸 수 없는 계정 (탈퇴처럼 취급, 풀면 다시 사용)
+alter table public.accounts add column if not exists auth_blocked boolean not null default false;
+-- 메랜/플래닛 말고 나중에 추가한 게임의 정지 정보: {"게임이름": {"banned": true, "until": "2027-01-01 12:00"}}
+alter table public.accounts add column if not exists other_bans jsonb not null default '{}'::jsonb;
+
 -- 근무자가 삭제하면 바로 지우지 않고 '삭제 요청'으로 표시 → 관리자가 승인해야 진짜 삭제
 alter table public.accounts add column if not exists delete_requested_at timestamptz;
 alter table public.accounts add column if not exists delete_requested_by uuid references public.profiles(id) on delete set null;
@@ -68,12 +73,15 @@ alter table public.accounts add column if not exists delete_prev_slot integer;
 create table if not exists public.characters (
     id          bigint generated always as identity primary key,
     account_id  bigint not null references public.accounts(id) on delete cascade,
-    game        text not null check (game in ('메랜', '플래닛')),
+    game        text not null,
     nickname    text not null default '',
     level_job   text not null default '',
     sort        integer not null default 0
 );
 create index if not exists characters_account_idx on public.characters(account_id);
+
+-- 게임 종류는 관리자가 추가할 수 있으므로 이전에 걸어 둔 제한을 푼다
+alter table public.characters drop constraint if exists characters_game_check;
 
 create table if not exists public.assignments (
     pc_id       bigint not null references public.pcs(id) on delete cascade,
@@ -257,12 +265,14 @@ begin
 
     if v_id is null then
         insert into accounts (owner, contact, provider, login_id, login_key, password, tag,
-                              mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, worker_id)
+                              mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, worker_id,
+                              auth_blocked, other_bans)
         values (trim(coalesce(p ->> 'owner', '')), trim(coalesce(p ->> 'contact', '')), v_prov,
                 trim(p ->> 'login_id'), v_key, coalesce(p ->> 'password', ''), trim(coalesce(p ->> 'tag', '')),
                 coalesce((p ->> 'mr_banned')::boolean, false), coalesce(p ->> 'mr_until', ''),
                 coalesce((p ->> 'pl_banned')::boolean, false), coalesce(p ->> 'pl_until', ''),
-                coalesce((p ->> 'withdrawn')::boolean, false), coalesce(p ->> 'note', ''), v_worker)
+                coalesce((p ->> 'withdrawn')::boolean, false), coalesce(p ->> 'note', ''), v_worker,
+                coalesce((p ->> 'auth_blocked')::boolean, false), coalesce(p -> 'other_bans', '{}'::jsonb))
         returning id into v_id;
         perform _log('계정 추가', _acc_label(v_id));
     else
@@ -273,6 +283,8 @@ begin
             mr_banned = coalesce((p ->> 'mr_banned')::boolean, false), mr_until = coalesce(p ->> 'mr_until', ''),
             pl_banned = coalesce((p ->> 'pl_banned')::boolean, false), pl_until = coalesce(p ->> 'pl_until', ''),
             withdrawn = coalesce((p ->> 'withdrawn')::boolean, false), note = coalesce(p ->> 'note', ''),
+            auth_blocked = coalesce((p ->> 'auth_blocked')::boolean, false),
+            other_bans = coalesce(p -> 'other_bans', '{}'::jsonb),
             worker_id = v_worker, version = version + 1, updated_at = now()
         where id = v_id;
         perform _log('계정 수정', _acc_label(v_id));
@@ -287,7 +299,7 @@ begin
         end if;
     end loop;
 
-    if coalesce((p ->> 'withdrawn')::boolean, false) then
+    if coalesce((p ->> 'withdrawn')::boolean, false) or coalesce((p ->> 'auth_blocked')::boolean, false) then
         delete from assignments where account_id = v_id;
     end if;
     return v_id;
@@ -471,6 +483,7 @@ begin
     if not found then raise exception '없는 계정이에요. 새로고침한 뒤 다시 시도하세요.'; end if;
     if not can_see_account(p_account) then raise exception '이 계정을 넣을 수 없어요. 새로고침하세요.'; end if;
     if v_acc.withdrawn then raise exception '탈퇴한 계정은 넣을 수 없어요.'; end if;
+    if v_acc.auth_blocked then raise exception '인증불가 계정은 넣을 수 없어요.'; end if;
     if v_acc.delete_requested_at is not null then raise exception '삭제 요청 중인 계정은 넣을 수 없어요.'; end if;
     select pc_id, slot into v_where from assignments where account_id = p_account;
     if found then
@@ -559,6 +572,18 @@ begin
     perform _log('팀 암호 설정', '');
 end $$;
 
+-- ============================================================ 게임 종류 (관리자)
+-- app_settings 'games' = ["메랜","플래닛", ...]  (계정 표의 닉/레벨직업/정지 열이 이 순서대로 생김)
+create or replace function public.set_games(p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+    if not is_admin() then raise exception '관리자만 할 수 있어요.'; end if;
+    if jsonb_typeof(p) <> 'array' or jsonb_array_length(p) = 0 then raise exception '게임이 하나 이상 있어야 해요.'; end if;
+    insert into app_settings (key, value) values ('games', p::text)
+    on conflict (key) do update set value = excluded.value;
+    perform _log('게임 종류 변경', (select string_agg(x, ', ') from jsonb_array_elements_text(p) x));
+end $$;
+
 -- ============================================================ 변경 감지 (자동 새로고침용)
 create or replace function public.last_change() returns bigint
 language sql stable security definer set search_path = public as $$
@@ -589,13 +614,15 @@ begin
 
     for a in select * from jsonb_array_elements(p -> 'accounts') loop
         insert into accounts (owner, contact, provider, login_id, login_key, password, tag,
-                              mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, worker_id)
+                              mr_banned, mr_until, pl_banned, pl_until, withdrawn, note, worker_id,
+                              auth_blocked, other_bans)
         values (coalesce(a ->> 'owner', ''), coalesce(a ->> 'contact', ''), coalesce(a ->> 'provider', ''),
                 trim(a ->> 'login_id'), lower(trim(a ->> 'login_id')), coalesce(a ->> 'password', ''),
                 coalesce(a ->> 'tag', ''), coalesce((a ->> 'mr_banned')::boolean, false), coalesce(a ->> 'mr_until', ''),
                 coalesce((a ->> 'pl_banned')::boolean, false), coalesce(a ->> 'pl_until', ''),
                 coalesce((a ->> 'withdrawn')::boolean, false), coalesce(a ->> 'note', ''),
-                nullif(a ->> 'worker_id', '')::uuid)
+                nullif(a ->> 'worker_id', '')::uuid,
+                coalesce((a ->> 'auth_blocked')::boolean, false), coalesce(a -> 'other_bans', '{}'::jsonb))
         returning id into v_id;
         ids := ids || v_id;
         k := 0;
@@ -646,6 +673,6 @@ grant execute on function
     public.save_pc(jsonb), public.delete_pc(bigint),
     public.assign_account(bigint, integer, bigint), public.unassign_slot(bigint, integer),
     public.move_account(bigint, bigint, integer),
-    public.save_profile(jsonb), public.set_team_key(text, text),
+    public.save_profile(jsonb), public.set_team_key(text, text), public.set_games(jsonb),
     public.last_change(), public.import_data(jsonb)
 to authenticated;

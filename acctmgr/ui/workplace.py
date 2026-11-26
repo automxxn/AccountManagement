@@ -29,8 +29,11 @@ REAL_ROLE = Qt.UserRole + 2         # 가려진 칸(암호)의 실제 값
 GAP_ROLE = Qt.UserRole + 3          # 컴퓨터 사이 간격 줄
 GROUP_START_ROLE = Qt.UserRole + 4  # 컴퓨터 칸의 첫 줄 (위쪽 테두리)
 OFF = len(PC_COLUMNS)  # 계정 열이 시작하는 위치
-ALL_HEADERS = PC_COLUMNS + ACCOUNT_COLUMNS
-LAST_COL = len(ALL_HEADERS)
+
+
+def all_headers() -> list[str]:
+    """[컴퓨터 정보 | 자리 | 계정 열]. 계정 열은 게임 목록에 따라 바뀐다."""
+    return PC_COLUMNS + ACCOUNT_COLUMNS
 
 
 def _repolish(w: QWidget) -> None:
@@ -145,7 +148,7 @@ class WorkplaceTab(QWidget):
         self.stat_pc = StatCard("컴퓨터")
         self.stat_empty = StatCard("빈 자리", "accent")
         self.stat_avail = StatCard("넣을 수 있는 계정", "success")
-        self.stat_ban = StatCard("양쪽 게임 모두 정지", "danger")
+        self.stat_ban = StatCard("모든 게임 정지", "danger")
         for s in (self.stat_pc, self.stat_empty, self.stat_avail, self.stat_ban):
             stats.addWidget(s)
         root.addLayout(stats)
@@ -178,8 +181,8 @@ class WorkplaceTab(QWidget):
 
         # 시트: [컴퓨터 정보 | 자리 | 계정 화면과 같은 열]
         self.show_worker = False  # 담당 근무자 개념은 없앰
-        self.table = BlockTable(0, len(ALL_HEADERS))
-        self.table.setHorizontalHeaderLabels(ALL_HEADERS)
+        self.table = BlockTable(0, len(all_headers()))
+        self.table.setHorizontalHeaderLabels(all_headers())
         # 선택은 직접 정한다: 컴퓨터 정보 칸은 그 칸 하나, 자리는 그 줄의 자리+계정 칸만
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -257,6 +260,11 @@ class WorkplaceTab(QWidget):
         self._render_cards()
         self._render_panel()
 
+    def games_changed(self) -> None:
+        """게임 목록이 바뀌었을 때: 열과 패널을 다시 그린다."""
+        self._render_cards()
+        self._render_panel()
+
     def restyle(self) -> None:
         """테마/배율이 바뀌었을 때 받아 둔 데이터로 다시 그린다 (서버 조회 없음)."""
         self.panel.setFixedWidth(px(380))
@@ -295,6 +303,9 @@ class WorkplaceTab(QWidget):
         pcs = self._visible_pcs()
         t.clearSpans()
         t.clearContents()
+        if t.columnCount() != len(all_headers()):
+            t.setColumnCount(len(all_headers()))
+        t.setHorizontalHeaderLabels(all_headers())
         t.setRowCount(sum(len(pc.slots) for pc in pcs) + len(pcs))
         bold = self.nav.bold_font()
         no_font = QFont(bold)
@@ -363,7 +374,7 @@ class WorkplaceTab(QWidget):
         fm = QFontMetrics(bold)
         pad = px(GridDelegate.PAD) * 2 + px(10)
         for c in range(OFF):
-            texts = [ALL_HEADERS[c]] + [t.item(row, c).text() for row in range(t.rowCount())
+            texts = [all_headers()[c]] + [t.item(row, c).text() for row in range(t.rowCount())
                                         if t.item(row, c) and self._row_map[row]]
             t.setColumnWidth(c, max(fm.horizontalAdvance(x) for x in texts) + pad)
         self._apply_selection()
@@ -414,7 +425,7 @@ class WorkplaceTab(QWidget):
             if row >= 0:
                 left, right = model.index(row, OFF - 1), model.index(row, OFF + len(ACCOUNT_COLUMNS) - 1)
                 sm.select(QItemSelection(left, right), QItemSelectionModel.Select)
-                col = cur_col if cur_col is not None and OFF - 1 <= cur_col < LAST_COL else OFF
+                col = cur_col if cur_col is not None and OFF - 1 <= cur_col < len(all_headers()) else OFF
                 sm.setCurrentIndex(model.index(row, col), QItemSelectionModel.NoUpdate)
         # 선택만 바꾸고 보던 위치는 그대로 (자동 스크롤로 첫 열이 가려지지 않게)
         t.horizontalScrollBar().setValue(hpos)
@@ -586,7 +597,7 @@ class WorkplaceTab(QWidget):
         grid.setVerticalSpacing(8)
         rows = [("아이디", a.login_id, a.login_id), ("비밀번호", "●" * 8 if a.password else "", a.password),
                 ("연락처", a.contact, None), ("메월코드", a.tag, None),
-                ("메랜", a.char_summary("메랜"), None), ("플래닛", a.char_summary("플래닛"), None)]
+                ] + [(g, a.char_summary(g), None) for g in GAMES]
         if a.note:
             rows.append(("비고", a.note, None))
         for i, (k, v, c) in enumerate(rows):
@@ -612,7 +623,7 @@ class WorkplaceTab(QWidget):
         self.pick_provider = QComboBox()
         self.pick_provider.addItems(["모든 유형"] + list(PROVIDERS))
         self.pick_ban = QComboBox()
-        self.pick_ban.addItems(["정지 계정 포함", "정지 없는 계정만", "메랜 가능한 계정", "플래닛 가능한 계정"])
+        self.pick_ban.addItems(["정지 계정 포함", "정지 없는 계정만"] + [f"{g} 가능한 계정" for g in GAMES])
         fl.addWidget(self.pick_provider, 1)
         fl.addWidget(self.pick_ban, 1)
         L.addLayout(fl)
@@ -652,9 +663,7 @@ class WorkplaceTab(QWidget):
                 continue
             if ban_mode == 1 and a.ban_labels():
                 continue
-            if ban_mode == 2 and a.mr_ban.active():
-                continue
-            if ban_mode == 3 and a.pl_ban.active():
+            if ban_mode >= 2 and a.ban(GAMES[ban_mode - 2]).active():
                 continue
             why = owner_rule_violation(a, target_pc, all_accs) if target_pc else None
             if why:
@@ -662,7 +671,7 @@ class WorkplaceTab(QWidget):
                 if not show_blocked:
                     continue
             # 보여줄 게임 줄: '메랜 가능' 필터면 메랜만, '플래닛 가능'이면 플래닛만, 그 외에는 둘 다
-            games = {2: ["메랜"], 3: ["플래닛"]}.get(ban_mode, list(GAMES))
+            games = [GAMES[ban_mode - 2]] if ban_mode >= 2 else list(GAMES)
             it = QListWidgetItem()
             it.setData(Qt.UserRole, a.id)
             card = self._pick_card(a, games, why)
@@ -713,7 +722,7 @@ class WorkplaceTab(QWidget):
                            f"<span style='color:{sub}'>[{html.escape(a.provider)}]</span>&nbsp;"
                            f"<span style='color:{ink}'>{html.escape(a.login_id)}</span>"))
         for g in games:
-            banned = (a.mr_ban if g == "메랜" else a.pl_ban).active()
+            banned = a.ban(g).active()
             dot = faint if why else (T("danger") if banned else T("success"))
             m = a.main(g)
             more = len(a.chars(g)) - 1

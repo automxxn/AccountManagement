@@ -7,7 +7,7 @@ from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
+    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -297,8 +297,11 @@ class AccountDialog(QDialog):
         self.login = QLineEdit(a.login_id)
         self.pw = PasswordField(a.password)
         self.tag = QLineEdit(a.tag)
-        self.mr_ban = BanField(a.mr_ban)
-        self.pl_ban = BanField(a.pl_ban)
+        self.ban_fields = {g: BanField(a.ban(g)) for g in GAMES}  # 게임마다 정지 칸
+        self.auth_blocked = QCheckBox("인증불가 (인증이 안 돼서 못 쓰는 계정)")
+        self.auth_blocked.setToolTip("아이디/비번은 있지만 인증을 못 해서 쓸 수 없는 계정이에요. 탈퇴처럼 작업장에 넣을 수 없고, "
+                                     "인증이 다시 되면 체크를 풀면 사용가능으로 돌아와요.")
+        self.auth_blocked.setChecked(a.auth_blocked)
         self.withdrawn = QCheckBox("탈퇴한 계정 (자리에서 빠지고 배정할 수 없어요)")
         self.withdrawn.setChecked(a.withdrawn)
         self.note = QPlainTextEdit(a.note)
@@ -312,8 +315,9 @@ class AccountDialog(QDialog):
         form.addRow("비밀번호", self.pw)
         form.addRow("메월코드", self.tag)
         form.addRow(section("상태"))
-        form.addRow("메랜정지", self.mr_ban)
-        form.addRow("플래닛정지", self.pl_ban)
+        for g, f in self.ban_fields.items():
+            form.addRow(f"{g}정지", f)
+        form.addRow("", self.auth_blocked)
         form.addRow("", self.withdrawn)
         form.addRow(section("메모"))
         form.addRow("비고", self.note)
@@ -341,11 +345,20 @@ class AccountDialog(QDialog):
         left.setLayout(form)
         left.setFixedWidth(px(470))
         cols.addWidget(left)
-        right = QVBoxLayout()
+        right_box = QWidget()
+        right = QVBoxLayout(right_box)
+        right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(12)
         for g in GAMES:
+            self.editors[g].setMinimumHeight(px(170))
             right.addWidget(self.editors[g], 1)
-        cols.addLayout(right, 1)
+        if len(GAMES) > 2:  # 게임이 많으면 캐릭터 칸을 스크롤로
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(right_box)
+            cols.addWidget(scroll, 1)
+        else:
+            cols.addWidget(right_box, 1)
         lay.addLayout(cols, 1)
         lay.addWidget(box)
 
@@ -359,20 +372,25 @@ class AccountDialog(QDialog):
         a.login_id = self.login.text()
         a.password = self.pw.text()
         a.tag = self.tag.text()
-        a.mr_ban = self.mr_ban.value()
-        a.pl_ban = self.pl_ban.value()
-        for b in (a.mr_ban, a.pl_ban):
+        for g, f in self.ban_fields.items():
+            a.set_ban(g, f.value())
+        for g in GAMES:
+            b = a.ban(g)
             if b.until and not DATE_RE.match(b.until):
                 QMessageBox.warning(self, "확인 필요", "정지 해제일은 2027-06-14 형식으로 입력하세요.")
                 return
         a.withdrawn = self.withdrawn.isChecked()
+        a.auth_blocked = self.auth_blocked.isChecked()
         a.note = self.note.toPlainText().strip()
+        hidden = [c for c in a.characters if c.game not in GAMES]  # 목록에서 뺀 게임의 캐릭터는 그대로 보관
         a.characters = []
         for g in GAMES:
             a.characters += self.editors[g].value()
-        if a.withdrawn and a.location:
-            if QMessageBox.question(self, "탈퇴 처리",
-                                    f"이 계정은 {a.location.text()}에 들어 있어요. 탈퇴로 바꾸면 자리에서 빠져요. 계속할까요?") \
+        a.characters += hidden
+        if (a.withdrawn or a.auth_blocked) and a.location:
+            what = "탈퇴" if a.withdrawn else "인증불가"
+            if QMessageBox.question(self, f"{what} 처리",
+                                    f"이 계정은 {a.location.text()}에 들어 있어요. {what}로 바꾸면 자리에서 빠져요. 계속할까요?") \
                     != QMessageBox.Yes:
                 return
         try:

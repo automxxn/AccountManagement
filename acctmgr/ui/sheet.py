@@ -1,6 +1,6 @@
 """계정 화면과 작업장이 같이 쓰는 시트(표) 부품.
 
-- ACCOUNT_COLUMNS: 계정 정보 열 (두 화면이 같은 순서로 보여준다)
+- ACCOUNT_COLUMNS: 계정 정보 열 (두 화면이 같은 순서로 보여준다, 게임 목록에 따라 바뀜)
 - fill_account_cells: 한 줄에 계정 정보를 채운다
 - SheetNav: Ctrl + 휠 = 표 크기, 휠 버튼 누르고 끌기 = 보는 위치 이동
 """
@@ -10,17 +10,36 @@ from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem
 
-from ..models import Account
+from ..models import GAMES, Account
 from .common import T, px, status_color
 from .connect import settings
 
-ACCOUNT_COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
-                   "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
-                   "위치", "비고"]
-# 아래 번호는 계정 열 안에서의 순서 (표에 앞쪽 열이 더 있으면 그만큼 더해서 쓴다)
-ACC_CHAR = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
-ACC_BAN = (11, 12)
-ACC_WIDE = (7, 8, 9, 10, 14)
+# 계정 정보 열은 게임 목록(GAMES)에 따라 달라진다. 다른 화면이 같은 객체를 보고 있으므로 내용만 바꾼다.
+ACCOUNT_COLUMNS: list[str] = []
+ACC_CHAR: dict[int, str] = {}   # 열 번호 → 게임 (닉/레벨직업 칸, 누르면 캐릭터 창)
+ACC_BAN: dict[int, str] = {}    # 열 번호 → 게임 (정지 칸)
+ACC_WIDE: list[int] = []        # 너무 넓어지지 않게 자를 열
+
+
+def rebuild_columns() -> None:
+    """게임 목록이 바뀌면 다시 계산: 상태 … 메월코드 | 게임별 닉, 레벨/직업 | 게임별 정지 | 위치 | 비고"""
+    cols = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드"]
+    ACC_CHAR.clear()
+    ACC_BAN.clear()
+    for g in GAMES:
+        ACC_CHAR[len(cols)] = g
+        cols.append(f"{g}닉")
+        ACC_CHAR[len(cols)] = g
+        cols.append(f"{g} 레벨/직업")
+    for g in GAMES:
+        ACC_BAN[len(cols)] = g
+        cols.append(f"{g}정지")
+    cols += ["위치", "비고"]
+    ACCOUNT_COLUMNS[:] = cols
+    ACC_WIDE[:] = list(ACC_CHAR) + [len(cols) - 1]
+
+
+rebuild_columns()
 
 ID_ROLE = Qt.UserRole          # 칸에 붙여 두는 계정 id
 GROUP_END_ROLE = Qt.UserRole + 1  # 이 줄 아래에 묶음(컴퓨터) 구분선을 굵게
@@ -38,15 +57,19 @@ def _nick(cs) -> str:
     return cs[0].nickname + (f"  (대표 · 외 {len(cs) - 1})" if len(cs) > 1 else "")
 
 
+def status_text(a: Account) -> str:
+    return "삭제 요청" if a.delete_requested else a.status
+
+
 def account_values(a: Account, show_pw: bool, worker_names: dict) -> list[str]:
-    mr, pl = a.chars("메랜"), a.chars("플래닛")
-    status = "● 삭제 요청" if a.delete_requested else ("● 탈퇴" if a.withdrawn else ("● " + a.status))
-    vals = [status, a.owner, a.contact, a.provider, a.login_id,
-            a.password if show_pw else ("●" * 6 if a.password else ""), a.tag,
-            _nick(mr), mr[0].lj if mr else "", _nick(pl), pl[0].lj if pl else "",
-            ban_text(a.mr_ban), ban_text(a.pl_ban),
-            a.location.text() if a.location else "",
-            a.note.replace("\n", " / ")]                                    # 비고
+    vals = ["● " + status_text(a), a.owner, a.contact, a.provider, a.login_id,
+            a.password if show_pw else ("●" * 6 if a.password else ""), a.tag]
+    for g in GAMES:
+        cs = a.chars(g)
+        vals += [_nick(cs), cs[0].lj if cs else ""]
+    for g in GAMES:
+        vals.append(ban_text(a.ban(g)))
+    vals += [a.location.text() if a.location else "", a.note.replace("\n", " / ")]
     assert len(vals) == len(ACCOUNT_COLUMNS)
     return vals
 
@@ -54,7 +77,7 @@ def account_values(a: Account, show_pw: bool, worker_names: dict) -> list[str]:
 def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, show_pw: bool,
                        worker_names: dict, bold: QFont, extra_role: dict | None = None) -> None:
     """row 줄의 offset 열부터 계정 정보를 채운다."""
-    mr, pl = a.chars("메랜"), a.chars("플래닛")
+    unusable = a.withdrawn or a.auth_blocked or a.delete_requested
     for i, v in enumerate(account_values(a, show_pw, worker_names)):
         it = QTableWidgetItem(v)
         it.setData(ID_ROLE, a.id)
@@ -62,14 +85,14 @@ def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, s
             it.setData(role, val)
         color = None
         if i == 0:
-            color = T("danger") if a.delete_requested else status_color("탈퇴" if a.withdrawn else a.status)
+            color = T("danger") if a.delete_requested else status_color(a.status)
             it.setFont(bold)
-        elif a.withdrawn or a.delete_requested:
+        elif unusable:
             color = T("faint")
         elif i in ACC_BAN and v:
             color = T("danger")
         elif i in ACC_CHAR:
-            cs = mr if ACC_CHAR[i] == "메랜" else pl
+            cs = a.chars(ACC_CHAR[i])
             if len(cs) > 1:
                 color = T("accent_text")
             it.setToolTip("\n".join(("★ " if k == 0 else "   ") + ch.text() for k, ch in enumerate(cs))
@@ -78,6 +101,10 @@ def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, s
             it.setForeground(QColor(color))
         if a.withdrawn:
             it.setToolTip("탈퇴한 계정 (작업장에 넣을 수 없어요)")
+        elif a.auth_blocked:
+            it.setToolTip("인증불가 계정 (인증이 다시 되면 수정 창에서 '인증불가'를 풀어 주세요)")
+        elif a.all_banned and i == 0:
+            it.setToolTip("모든 게임이 정지된 계정")
         if a.delete_requested:
             it.setToolTip(f"근무자가 삭제를 요청했어요 ({a.delete_requested_at}). 아래 '삭제 승인'/'삭제 거절'로 처리하세요.")
         table.setItem(row, offset + i, it)
