@@ -4,7 +4,7 @@
 -- 원칙
 --  * 테이블은 읽기만 RLS로 허용하고, 쓰기는 전부 아래 함수(RPC)로만 한다. 함수 안에서 권한을 검사한다.
 --  * 첫 번째로 가입한 사용자가 관리자가 되고, 이후 가입자는 '대기' 상태로 관리자 승인을 기다린다.
---  * 근무자는 자기 담당 컴퓨터, 자기 담당 계정, 자기 컴퓨터에 들어간 계정만 본다.
+--  * 근무자는 '작업장 보기'/'계정 보기' 권한(근무자별, 기본 켜짐)에 따라 전체를 본다.
 
 -- ============================================================ 테이블
 create table if not exists public.profiles (
@@ -18,6 +18,9 @@ create table if not exists public.profiles (
     can_edit_pc         boolean not null default false,
     created_at          timestamptz not null default now()
 );
+
+alter table public.profiles add column if not exists can_view_workplace boolean not null default true;
+alter table public.profiles add column if not exists can_view_accounts boolean not null default true;
 
 create table if not exists public.pcs (
     id          bigint generated always as identity primary key,
@@ -139,21 +142,23 @@ language sql stable security definer set search_path = public as $$
             when perm_name = 'edit_account' then pr.can_edit_account
             when perm_name = 'delete_account' then pr.can_delete_account
             when perm_name = 'edit_pc' then pr.can_edit_pc
+            when perm_name = 'view_workplace' then pr.can_view_workplace
+            when perm_name = 'view_accounts' then pr.can_view_accounts
             else false end
         from profiles pr where pr.id = auth.uid()), false)
 $$;
 
--- 근무자가 볼 수 있는 계정: 자기 담당 계정만 (담당 컴퓨터에 들어 있어도 다른 사람 담당이면 안 보임)
+-- 근무자가 볼 수 있는 계정: 작업장 보기나 계정 보기 권한이 있으면 전부 (삭제 요청 중인 계정은 숨김)
 create or replace function public.can_see_account(a_id bigint) returns boolean
 language sql stable security definer set search_path = public as $$
     select is_admin()
-        or (is_member() and exists (select 1 from accounts a
-                                    where a.id = a_id and a.worker_id = auth.uid() and a.delete_requested_at is null))
+        or (is_member() and (has_perm('view_workplace') or has_perm('view_accounts'))
+            and exists (select 1 from accounts a where a.id = a_id and a.delete_requested_at is null))
 $$;
 
 create or replace function public.owns_pc(p_id bigint) returns boolean
 language sql stable security definer set search_path = public as $$
-    select is_admin() or (is_member() and exists (select 1 from pcs where id = p_id and worker_id = auth.uid()))
+    select is_admin() or (is_member() and has_perm('view_workplace') and exists (select 1 from pcs where id = p_id))
 $$;
 
 -- ============================================================ 읽기 권한 (RLS)
@@ -171,7 +176,7 @@ create policy profiles_read on public.profiles for select to authenticated
 
 drop policy if exists pcs_read on public.pcs;
 create policy pcs_read on public.pcs for select to authenticated
-    using (is_admin() or (is_member() and worker_id = auth.uid()));
+    using (is_admin() or (is_member() and has_perm('view_workplace')));
 
 drop policy if exists accounts_read on public.accounts;
 create policy accounts_read on public.accounts for select to authenticated
@@ -371,7 +376,7 @@ begin
     else
         select * into v_cur from pcs where id = v_id for update;
         if not found then raise exception '없는 컴퓨터예요. 새로고침한 뒤 다시 시도하세요.'; end if;
-        if not (is_admin() or (v_cur.worker_id = auth.uid() and has_perm('edit_pc'))) then
+        if not (is_admin() or (has_perm('view_workplace') and has_perm('edit_pc'))) then
             raise exception '이 컴퓨터 정보를 수정할 권한이 없어요.';
         end if;
         if v_cur.version <> coalesce((p ->> 'version')::integer, -1) then
@@ -461,10 +466,10 @@ begin
     if not found or p_slot < 1 or p_slot > v_pc.slot_count then
         raise exception '없는 자리예요. 새로고침한 뒤 다시 시도하세요.';
     end if;
-    if not owns_pc(p_pc) then raise exception '담당 컴퓨터가 아니에요.'; end if;
+    if not owns_pc(p_pc) then raise exception '작업장을 볼 권한이 없어요.'; end if;
     select * into v_acc from accounts where id = p_account;
     if not found then raise exception '없는 계정이에요. 새로고침한 뒤 다시 시도하세요.'; end if;
-    if not (is_admin() or v_acc.worker_id = auth.uid()) then raise exception '담당 계정이 아니에요.'; end if;
+    if not can_see_account(p_account) then raise exception '이 계정을 넣을 수 없어요. 새로고침하세요.'; end if;
     if v_acc.withdrawn then raise exception '탈퇴한 계정은 넣을 수 없어요.'; end if;
     if v_acc.delete_requested_at is not null then raise exception '삭제 요청 중인 계정은 넣을 수 없어요.'; end if;
     select pc_id, slot into v_where from assignments where account_id = p_account;
@@ -484,10 +489,10 @@ create or replace function public.unassign_slot(p_pc bigint, p_slot integer) ret
 language plpgsql security definer set search_path = public as $$
 declare v_acc bigint;
 begin
-    if not owns_pc(p_pc) then raise exception '담당 컴퓨터가 아니에요.'; end if;
+    if not owns_pc(p_pc) then raise exception '작업장을 볼 권한이 없어요.'; end if;
     select account_id into v_acc from assignments where pc_id = p_pc and slot = p_slot;
     if v_acc is not null and not can_see_account(v_acc) then
-        raise exception '다른 담당자의 계정이라 뺄 수 없어요. 관리자에게 요청하세요.';
+        raise exception '이 계정은 뺄 수 없어요. 새로고침하세요.';
     end if;
     delete from assignments where pc_id = p_pc and slot = p_slot returning account_id into v_acc;
     if v_acc is not null then
@@ -503,8 +508,8 @@ declare
 begin
     select pc_id, slot into v_src from assignments where account_id = p_account;
     if not found then raise exception '이 계정은 어느 자리에도 없어요.'; end if;
-    if not (owns_pc(v_src.pc_id) and owns_pc(p_pc)) then raise exception '담당 컴퓨터끼리만 옮길 수 있어요.'; end if;
-    if not can_see_account(p_account) then raise exception '담당 계정이 아니에요.'; end if;
+    if not (owns_pc(v_src.pc_id) and owns_pc(p_pc)) then raise exception '작업장을 볼 권한이 없어요.'; end if;
+    if not can_see_account(p_account) then raise exception '이 계정은 옮길 수 없어요. 새로고침하세요.'; end if;
     perform _check_owner_rule(p_account, p_pc);
     select * into v_pc from pcs where id = p_pc;
     if not found or p_slot < 1 or p_slot > v_pc.slot_count then raise exception '없는 자리예요.'; end if;
@@ -535,7 +540,9 @@ begin
         can_add_account = coalesce((p ->> 'can_add_account')::boolean, false),
         can_edit_account = coalesce((p ->> 'can_edit_account')::boolean, false),
         can_delete_account = coalesce((p ->> 'can_delete_account')::boolean, false),
-        can_edit_pc = coalesce((p ->> 'can_edit_pc')::boolean, false)
+        can_edit_pc = coalesce((p ->> 'can_edit_pc')::boolean, false),
+        can_view_workplace = coalesce((p ->> 'can_view_workplace')::boolean, true),
+        can_view_accounts = coalesce((p ->> 'can_view_accounts')::boolean, true)
     where id = v_id;
     perform _log('근무자 설정', format('%s: %s', p ->> 'display_name', v_role));
 end $$;

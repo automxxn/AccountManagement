@@ -287,9 +287,7 @@ class AccountDialog(QDialog):
         a = self.acc
 
         form = QFormLayout()
-        self.worker = worker_combo(repo, a.worker_id)
-        if self.worker:
-            form.addRow("담당 근무자", self.worker)
+        self.worker = None  # 담당 근무자 개념은 없앰
         self.owner = QLineEdit(a.owner)
         self.contact = QLineEdit(a.contact)
         self.provider = QComboBox()
@@ -397,9 +395,7 @@ class PcDialog(QDialog):
         self.resize(px(460), px(460))
 
         form = QFormLayout()
-        self.worker = worker_combo(repo, p.worker_id)
-        if self.worker:
-            form.addRow("담당 근무자", self.worker)
+        self.worker = None  # 담당 근무자 개념은 없앰
         self.no = QSpinBox()
         self.no.setRange(1, 9999)
         self.no.setValue(p.no)

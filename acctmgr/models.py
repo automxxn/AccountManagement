@@ -202,6 +202,8 @@ class PC:
 
 
 PERMS = (
+    ("can_view_workplace", "작업장 보기"),
+    ("can_view_accounts", "계정 보기"),
     ("can_add_account", "계정 추가"),
     ("can_edit_account", "계정 정보 수정"),
     ("can_delete_account", "계정 삭제"),
@@ -220,6 +222,8 @@ class Profile:
     can_edit_account: bool = True
     can_delete_account: bool = True
     can_edit_pc: bool = True
+    can_view_workplace: bool = True
+    can_view_accounts: bool = True
 
     @property
     def is_admin(self) -> bool:

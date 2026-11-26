@@ -181,7 +181,9 @@ class CloudRepository:
                        role=r.get("role", "pending"), can_add_account=r.get("can_add_account", False),
                        can_edit_account=r.get("can_edit_account", False),
                        can_delete_account=r.get("can_delete_account", False),
-                       can_edit_pc=r.get("can_edit_pc", False))
+                       can_edit_pc=r.get("can_edit_pc", False),
+                       can_view_workplace=r.get("can_view_workplace", True),
+                       can_view_accounts=r.get("can_view_accounts", True))
 
     def _account_payload(self, a: Account, encrypt: bool = True) -> dict:
         return {
@@ -291,7 +293,8 @@ class CloudRepository:
         self._rpc("save_profile", {"p": {
             "id": p.id, "display_name": p.display_name, "role": p.role,
             "can_add_account": p.can_add_account, "can_edit_account": p.can_edit_account,
-            "can_delete_account": p.can_delete_account, "can_edit_pc": p.can_edit_pc}})
+            "can_delete_account": p.can_delete_account, "can_edit_pc": p.can_edit_pc,
+            "can_view_workplace": p.can_view_workplace, "can_view_accounts": p.can_view_accounts}})
 
     def bulk_import(self, accounts: list[Account], pcs: list[PC], links: list[tuple[int, int, int]]) -> int:
         """links: (pc_no, slot, accounts 리스트의 인덱스). 기존 데이터는 모두 지운다."""

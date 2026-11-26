@@ -18,7 +18,7 @@ from .common import (
     vline,
 )
 from .dialogs import AccountDialog, CharacterDialog, PcDialog
-from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetNav, cap_widths, fill_account_cells
+from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetNav, cap_widths, fill_account_cells
 
 PC_FILTERS = ["모든 컴퓨터", "빈 자리가 있는 컴퓨터", "정지 계정이 있는 컴퓨터"]
 MIN_SLOTS = 2  # 컴퓨터마다 기본 자리 수 (이 밑으로는 줄일 수 없음)
@@ -29,8 +29,8 @@ REAL_ROLE = Qt.UserRole + 2         # 가려진 칸(암호)의 실제 값
 GAP_ROLE = Qt.UserRole + 3          # 컴퓨터 사이 간격 줄
 GROUP_START_ROLE = Qt.UserRole + 4  # 컴퓨터 칸의 첫 줄 (위쪽 테두리)
 OFF = len(PC_COLUMNS)  # 계정 열이 시작하는 위치
-PC_WORKER_COL = OFF + len(ACCOUNT_COLUMNS)  # 컴퓨터 담당 (맨 오른쪽 끝)
-ALL_HEADERS = PC_COLUMNS + ACCOUNT_COLUMNS + ["컴퓨터 담당"]
+ALL_HEADERS = PC_COLUMNS + ACCOUNT_COLUMNS
+LAST_COL = len(ALL_HEADERS)
 
 
 def _repolish(w: QWidget) -> None:
@@ -177,7 +177,7 @@ class WorkplaceTab(QWidget):
         left.addLayout(bar)
 
         # 시트: [컴퓨터 정보 | 자리 | 계정 화면과 같은 열]
-        self.show_worker = repo.is_cloud and repo.me.is_admin
+        self.show_worker = False  # 담당 근무자 개념은 없앰
         self.table = BlockTable(0, len(ALL_HEADERS))
         self.table.setHorizontalHeaderLabels(ALL_HEADERS)
         # 선택은 직접 정한다: 컴퓨터 정보 칸은 그 칸 하나, 자리는 그 줄의 자리+계정 칸만
@@ -193,8 +193,6 @@ class WorkplaceTab(QWidget):
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(True)
         hh.setDefaultAlignment(Qt.AlignCenter)
-        self.table.setColumnHidden(PC_WORKER_COL, not self.show_worker)
-        self.table.setColumnHidden(OFF + ACC_WORKER, not self.show_worker)
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.cellDoubleClicked.connect(self._cell_double_clicked)
         self.table.setMouseTracking(True)
@@ -325,12 +323,7 @@ class WorkplaceTab(QWidget):
                 t.setRowHeight(r, row_h)
                 end = {GROUP_END_ROLE: False}
                 if i == 1:
-                    worker = ((self.worker_names.get(pc.worker_id, "?") if pc.worker_id else "없음")
-                              if self.show_worker else "")
                     pw = pc.anydesk_pw if show_pw else ("●" * 6 if pc.anydesk_pw else "")
-                    w_it = QTableWidgetItem(worker)
-                    w_it.setTextAlignment(Qt.AlignCenter)
-                    t.setItem(r, PC_WORKER_COL, w_it)
                     for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pw]):
                         it = QTableWidgetItem(v)
                         it.setTextAlignment(Qt.AlignCenter)
@@ -361,7 +354,7 @@ class WorkplaceTab(QWidget):
                 r += 1
             blocks.append((start, r - 1))
             if n > 1:
-                for c in list(PC_INFO_COLS) + [PC_WORKER_COL]:
+                for c in PC_INFO_COLS:
                     t.setSpan(start, c, n, 1)
         t.blocks = blocks
         self._update_active_block()
@@ -369,7 +362,7 @@ class WorkplaceTab(QWidget):
         # 합친 칸(컴퓨터 정보)은 자동 너비 계산에서 빠지므로 글자 길이로 직접 맞춘다
         fm = QFontMetrics(bold)
         pad = px(GridDelegate.PAD) * 2 + px(10)
-        for c in list(range(OFF)) + [PC_WORKER_COL]:
+        for c in range(OFF):
             texts = [ALL_HEADERS[c]] + [t.item(row, c).text() for row in range(t.rowCount())
                                         if t.item(row, c) and self._row_map[row]]
             t.setColumnWidth(c, max(fm.horizontalAdvance(x) for x in texts) + pad)
@@ -390,7 +383,7 @@ class WorkplaceTab(QWidget):
         pc_id, slot = self._row_map[r]
         pc = self._pc(pc_id)
         aid = pc.slots[slot - 1] if pc else None
-        if c in PC_INFO_COLS or c == PC_WORKER_COL:
+        if c in PC_INFO_COLS:
             self.select_pc_cell(pc_id, c)
             return
         if (c - OFF) in ACC_CHAR and aid in self.accs:
@@ -421,7 +414,7 @@ class WorkplaceTab(QWidget):
             if row >= 0:
                 left, right = model.index(row, OFF - 1), model.index(row, OFF + len(ACCOUNT_COLUMNS) - 1)
                 sm.select(QItemSelection(left, right), QItemSelectionModel.Select)
-                col = cur_col if cur_col is not None and OFF - 1 <= cur_col < PC_WORKER_COL else OFF
+                col = cur_col if cur_col is not None and OFF - 1 <= cur_col < LAST_COL else OFF
                 sm.setCurrentIndex(model.index(row, col), QItemSelectionModel.NoUpdate)
         # 선택만 바꾸고 보던 위치는 그대로 (자동 스크롤로 첫 열이 가려지지 않게)
         t.horizontalScrollBar().setValue(hpos)

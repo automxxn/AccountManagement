@@ -440,6 +440,16 @@ def page() -> tuple[QWidget, QVBoxLayout]:
     return w, lay
 
 
+def app_icon():
+    """프로그램 아이콘 (창 제목줄/작업표시줄)."""
+    import base64
+    from PySide6.QtGui import QIcon, QPixmap
+    from .icon_data import ICON_PNG_B64
+    pm = QPixmap()
+    pm.loadFromData(base64.b64decode("".join(ICON_PNG_B64)), "PNG")
+    return QIcon(pm)
+
+
 def copy_text(text: str) -> None:
     QApplication.clipboard().setText(text)
 

@@ -16,12 +16,11 @@ from .connect import settings
 
 ACCOUNT_COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
                    "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
-                   "위치", "비고", "담당"]
+                   "위치", "비고"]
 # 아래 번호는 계정 열 안에서의 순서 (표에 앞쪽 열이 더 있으면 그만큼 더해서 쓴다)
 ACC_CHAR = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
 ACC_BAN = (11, 12)
 ACC_WIDE = (7, 8, 9, 10, 14)
-ACC_WORKER = 15  # 담당 (맨 오른쪽, 클라우드 관리자에게만 보임)
 
 ID_ROLE = Qt.UserRole          # 칸에 붙여 두는 계정 id
 GROUP_END_ROLE = Qt.UserRole + 1  # 이 줄 아래에 묶음(컴퓨터) 구분선을 굵게
@@ -47,8 +46,7 @@ def account_values(a: Account, show_pw: bool, worker_names: dict) -> list[str]:
             _nick(mr), mr[0].lj if mr else "", _nick(pl), pl[0].lj if pl else "",
             ban_text(a.mr_ban), ban_text(a.pl_ban),
             a.location.text() if a.location else "",
-            a.note.replace("\n", " / "),                                    # 비고
-            worker_names.get(a.worker_id, "") if a.worker_id else ""]       # 담당
+            a.note.replace("\n", " / ")]                                    # 비고
     assert len(vals) == len(ACCOUNT_COLUMNS)
     return vals
 

@@ -76,7 +76,13 @@ class MainWindow(QMainWindow):
         self.accounts = AccountsTab(repo)
         self.history = HistoryTab(repo)
         self.workers_tab = WorkersTab(repo) if (self.cloud and me.is_admin) else None
-        self.pages = [("작업장", self.work), ("계정", self.accounts), ("변경 기록", self.history)]
+        # 근무자는 근무자 관리에서 켜 준 메뉴만 보인다 (관리자는 전부)
+        self.pages = []
+        if me.can("can_view_workplace"):
+            self.pages.append(("작업장", self.work))
+        if me.can("can_view_accounts"):
+            self.pages.append(("계정", self.accounts))
+        self.pages.append(("변경 기록", self.history))
         if self.workers_tab:
             self.pages.append(("근무자 관리", self.workers_tab))
             self.workers_tab.changed.connect(self._after_change)

@@ -5,6 +5,7 @@ Set-Location $PSScriptRoot
 
 python -m PyInstaller --noconfirm --clean --onefile --windowed `
     --name AccountManagement `
+    --icon assets/app.ico `
     --collect-submodules acctmgr `
     run_app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }

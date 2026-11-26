@@ -40,7 +40,7 @@ class WorkersTab(QWidget):
         self.workers: list[Profile] = []
         hint = QLabel("① 근무자가 로그인 창에서 '가입 요청'을 체크하고 가입하면 여기에 '승인 대기'로 나타나요.\n"
                       "② 역할을 '근무자'로 바꾸고 권한을 체크한 뒤 저장하세요.\n"
-                      "③ 컴퓨터/계정 수정 창의 '담당 근무자'에서 맡길 것을 정하세요. 근무자는 담당 컴퓨터와 담당 계정만 볼 수 있어요.")
+                      "③ '작업장 보기'/'계정 보기'를 끄면 그 메뉴가 근무자에게서 사라져요. (계정 보기를 꺼도 작업장 안의 계정 정보는 보여요)")
         hint.setWordWrap(True)
         hint.setObjectName("hintBox")
         self.table = QTableWidget(0, len(COLS))
@@ -103,7 +103,7 @@ class WorkersTab(QWidget):
         hf.setPixelSize(px(13))
         hf.setBold(True)
         fm = QFontMetrics(hf)
-        for c, w in enumerate([180, 160, 140] + [120] * len(PERMS) + [100]):
+        for c, w in enumerate([160, 140, 130] + [110] * len(PERMS) + [90]):
             self.table.setColumnWidth(c, max(px(w), fm.horizontalAdvance(COLS[c]) + px(44)))
 
     def _save(self, r: int, p: Profile, role: QComboBox, checks: list[QCheckBox]) -> None:

@@ -13,10 +13,9 @@ from ..db import Repository
 from ..models import STATUS_AVAILABLE, STATUS_IN_USE, Account, norm_login
 from .common import button, copy_text, muted, page_header, px, run_safely, style_table
 from .dialogs import AccountDialog, CharacterDialog
-from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells
+from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells
 
 COLUMNS = ACCOUNT_COLUMNS
-COL_WORKER = ACC_WORKER  # 담당은 맨 오른쪽
 CHAR_COLS = ACC_CHAR     # 누르면 캐릭터 창
 FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심", "삭제 요청"]
 
@@ -98,8 +97,7 @@ class AccountsTab(QWidget):
         brow.addWidget(self.tzoom_btn)
         brow.addStretch(1)
         self.worker_names: dict = {}
-        self.show_worker = repo.is_cloud and me.is_admin
-        self.table.setColumnHidden(COL_WORKER, not self.show_worker)
+        self.show_worker = False  # 담당 근무자 개념은 없앰 (근무자 관리의 보기 권한으로 대신)
         brow.addWidget(button("아이디 복사", "", lambda: self._copy("id")))
         brow.addWidget(button("비번 복사", "", lambda: self._copy("pw")))
         self.pw_btn = button("비번 보기")

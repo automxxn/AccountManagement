@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QApplication
 from . import logsetup
 from .db import Repository
 from .version import __version__
-from .ui.common import apply_appearance
+from .ui.common import app_icon, apply_appearance
 from .ui.connect import settings, start_repository
 from .ui.main_window import MainWindow
 from .ui.update_ui import startup_check
@@ -16,6 +16,7 @@ def main() -> None:
     logsetup.log.info("시작 v%s", __version__)
     app = QApplication(sys.argv)
     app.setApplicationName("AccountManagement")
+    app.setWindowIcon(app_icon())
     app.setStyle("Fusion")
     s = settings()
     apply_appearance(s.value("theme", "light"), float(s.value("zoom", 1.0)))
