@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import PERMS, ROLES, Profile
-from .common import button, muted, page_header, px, run_safely
+from .common import button, muted, page_header, px, run_safely, style_table
 from ..cloud import LOGIN_DOMAIN
 
 COLS = ["이름", "아이디", "역할"] + [label for _, label in PERMS] + [""]
@@ -46,7 +46,7 @@ class WorkersTab(QWidget):
         self.table.setHorizontalHeaderLabels(COLS)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(px(44))
-        self.table.setShowGrid(True)
+        style_table(self.table)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)

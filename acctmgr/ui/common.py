@@ -4,7 +4,8 @@ from __future__ import annotations
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyledItemDelegate,
+    QTableWidget, QVBoxLayout, QWidget,
 )
 
 from ..db import RepoError
@@ -22,6 +23,7 @@ THEMES = {
         "slot_empty": "#F9FAFB", "slot_empty_line": "#C4C9D1", "slot_locked": "#F3F4F6", "slotno_bg": "#EEF0F3",
         "scroll": "#C9CDD4", "scroll_hover": "#A9AFB8", "alt_row": "#FAFBFC", "header": "#F7F8FA",
         "header_ink": "#4B5563", "selection": "#C9DAFB",
+        "table_bg": "#F1F3F6", "row_line": "#CDD2DA", "col_line": "#E0E3E8",
         "badge": {"ban": ("#FDECEC", "#B42318"), "info": ("#EEEFF1", "#3D4450"),
                   "worker": ("#F3EEFE", "#6D28D9")},
         "status": {"사용가능": "#1A7F37", "사용중": "#1D4ED8", "탈퇴": "#B42318"},
@@ -37,6 +39,7 @@ THEMES = {
         "slot_empty": "#1A1D22", "slot_empty_line": "#3F4650", "slot_locked": "#22262C", "slotno_bg": "#2E333B",
         "scroll": "#3A404A", "scroll_hover": "#4C535E", "alt_row": "#22252B", "header": "#23272E",
         "header_ink": "#B4BBC4", "selection": "#2C4A80",
+        "table_bg": "#181B20", "row_line": "#3A404A", "col_line": "#272B32",
         "badge": {"ban": ("#3A1F22", "#F87171"), "info": ("#2A2F37", "#C3C8CF"),
                   "worker": ("#2E2546", "#C4B5FD")},
         "status": {"사용가능": "#4ADE80", "사용중": "#7AA7FA", "탈퇴": "#F87171"},
@@ -124,8 +127,8 @@ QComboBox QAbstractItemView {{ border: 1px solid {c['line']}; background: {c['su
     selection-background-color: {c['accent_soft']}; selection-color: {c['ink']}; }}
 QCheckBox {{ spacing: 6px; }}
 
-QTableWidget {{ background: {c['surface']}; border: 1px solid {c['line']}; border-radius: 10px; gridline-color: {c['grid']};
-    alternate-background-color: {c['alt_row']}; selection-background-color: {c['accent_soft']}; selection-color: {c['ink']};
+QTableWidget {{ background: {c['table_bg']}; border: 1px solid {c['line']}; border-radius: 10px; gridline-color: {c['grid']};
+    alternate-background-color: {c['table_bg']}; selection-background-color: {c['accent_soft']}; selection-color: {c['ink']};
     color: {c['ink']}; }}
 QTableWidget QLineEdit {{ padding: 0 4px; border-radius: 0; }}
 QHeaderView::section {{ background: {c['header']}; border: none; border-bottom: 1px solid {c['line']};
@@ -330,6 +333,25 @@ class ToggleSwitch(QAbstractButton):
         x = 3 + (w - d - 6) * self._pos
         p.setBrush(QColor("#FFFFFF"))
         p.drawEllipse(QRectF(x, 3, d, d))
+
+
+class GridDelegate(QStyledItemDelegate):
+    """표 칸 그리기: 세로(열) 구분선은 가늘게, 가로(행) 구분선은 굵게 해서 계정끼리 확실히 나뉘어 보이게."""
+
+    def paint(self, painter, option, index) -> None:
+        super().paint(painter, option, index)
+        r = option.rect
+        painter.save()
+        painter.fillRect(r.right(), r.top(), 1, r.height(), QColor(T("col_line")))
+        painter.fillRect(r.left(), r.bottom() - 1, r.width(), 2, QColor(T("row_line")))
+        painter.restore()
+
+
+def style_table(table: QTableWidget) -> None:
+    """모든 표에 같은 모양: 단색 배경 + 직접 그리는 구분선."""
+    table.setShowGrid(False)
+    table.setAlternatingRowColors(False)
+    table.setItemDelegate(GridDelegate(table))
 
 
 def page() -> tuple[QWidget, QVBoxLayout]:

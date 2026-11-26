@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from ..db import Repository, RepoError
 from ..models import GAMES, PC, PROVIDERS, Account, Ban, Character, join_level_job, split_level_job
-from .common import T, copy_text, muted, px
+from .common import T, copy_text, muted, px, style_table
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -85,7 +85,7 @@ class CharacterEditor(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setShowGrid(True)
+        style_table(self.table)
         if not editable:
             self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         for c in chars:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -15,7 +15,7 @@ from ..models import ROLES
 from ..version import __version__
 from .accounts import AccountsTab
 from .common import (
-    ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, theme,
+    ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
 )
 from .connect import ConnectionDialog, settings
 from .update_ui import manual_check
@@ -38,8 +38,8 @@ class HistoryTab(QWidget):
         self.table.setHorizontalHeaderLabels(["시각", "작업자", "작업", "내용"])
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(True)
+
+        style_table(self.table)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -93,7 +93,6 @@ class MainWindow(QMainWindow):
         h.addWidget(self._sidebar())
         h.addWidget(self.stack, 1)
         self.setCentralWidget(central)
-        QApplication.instance().installEventFilter(self)  # Ctrl + 마우스 휠로 배율 조절
 
         self._last_change = None
         self.refresh_all()
@@ -141,17 +140,13 @@ class MainWindow(QMainWindow):
         self.dark.toggled.connect(lambda on: self.set_appearance(theme_name="dark" if on else "light"))
         row.addWidget(self.dark)
         pl.addLayout(row)
-        zh = QHBoxLayout()
-        zh.addWidget(QLabel("화면 배율"))
-        zh.addStretch(1)
-        zh.addWidget(label("Ctrl + 휠", "faint"))
-        pl.addLayout(zh)
+        pl.addWidget(QLabel("화면 배율 (전체)"))
         zr = QHBoxLayout()
         zr.setSpacing(4)
-        zr.addWidget(button("-", "zoom", lambda: self.set_appearance(zoom=scale() - ZOOM_STEP), "작게 (Ctrl + 휠 아래)"))
+        zr.addWidget(button("-", "zoom", lambda: self.set_appearance(zoom=scale() - ZOOM_STEP), "화면 전체를 작게"))
         self.zoom_btn = button(f"{round(scale() * 100)}%", "zoom", lambda: self.set_appearance(zoom=1.0), "누르면 100%로")
         zr.addWidget(self.zoom_btn, 1)
-        zr.addWidget(button("+", "zoom", lambda: self.set_appearance(zoom=scale() + ZOOM_STEP), "크게 (Ctrl + 휠 위)"))
+        zr.addWidget(button("+", "zoom", lambda: self.set_appearance(zoom=scale() + ZOOM_STEP), "화면 전체를 크게"))
         pl.addLayout(zr)
         lay.addWidget(pref)
 
@@ -195,16 +190,6 @@ class MainWindow(QMainWindow):
         self.dark.update()
         for _, t in self.pages:
             t.restyle()
-
-    def eventFilter(self, obj, ev) -> bool:
-        # 앱 전체 이벤트가 지나가므로 휠 이벤트만 보고 나머지는 그대로 통과시킨다
-        if ev.type() != QEvent.Wheel or not (ev.modifiers() & Qt.ControlModifier):
-            return False
-        if not self.isActiveWindow():
-            return False
-        step = ZOOM_STEP if ev.angleDelta().y() > 0 else -ZOOM_STEP
-        self.set_appearance(zoom=scale() + step)
-        return True
 
     def _menu(self) -> QMenu:
         m = QMenu(self)
