@@ -235,6 +235,7 @@ class PC:
     version: int = 0
     worker_id: str | None = None  # 담당 근무자 (클라우드)
     slots: list[int | None] = field(default_factory=list)  # 자리별 account id
+    agent_settings: dict = field(default_factory=dict)  # LD CLOUD 실행기 설정 (클라우드)
 
     def title(self) -> str:
         return f"{self.no}. {self.name}".strip()
@@ -247,6 +248,7 @@ PERMS = (
     ("can_edit_account", "계정 정보 수정"),
     ("can_delete_account", "계정 삭제"),
     ("can_edit_pc", "컴퓨터 정보 수정"),
+    ("can_control_pc", "PC 조종"),
 )
 ROLES = {"super": "총관리자", "admin": "관리자", "worker": "근무자", "pending": "승인 대기"}
 
@@ -273,6 +275,7 @@ class Profile:
     can_view_workplace: bool = True
     can_view_accounts: bool = True
     can_assign_team: bool = False   # 관리자만: 가입 승인과 팀 배정
+    can_control_pc: bool = True     # LD CLOUD 실행기에 명령 보내기 (로컬은 혼자라 켬)
     teams: list[int] = field(default_factory=list)  # 속한 팀 (근무자 1개, 관리자 여러 개)
 
     @property
@@ -310,3 +313,37 @@ def owner_rule_violation(acc: Account, target_pc_id: int, accounts: list[Account
             return (f"명의자 '{key}'의 계정이 이미 {a.location.pc_no}번 컴퓨터에 있어요. "
                     f"같은 명의 계정은 같은 컴퓨터에만 넣을 수 있어요.")
     return None
+
+
+# ---------------------------------------------------------------- PC 실행기 (LD CLOUD 실행기)
+AGENT_KINDS = {"start": "시작", "restart": "재시작", "close": "종료", "login_a": "A 로그인", "login_b": "B 로그인",
+               "stop": "중지"}
+COMMAND_STATUS = {"queued": "기다리는 중", "running": "실행 중", "done": "완료", "failed": "실패", "cancelled": "취소됨"}
+ONLINE_SECONDS = 90  # 마지막 연락이 이보다 오래되면 꺼진 것으로 본다
+
+
+@dataclass
+class Agent:
+    user_id: str
+    pc_id: int | None = None
+    machine: str = ""
+    version: str = ""
+    public_key: str = ""
+    last_seen: str = ""           # 'YYYY-MM-DD HH:MM:SS' (UTC)
+    seconds_ago: float | None = None
+    state: dict = field(default_factory=dict)
+    devices: list = field(default_factory=list)
+
+    @property
+    def online(self) -> bool:
+        return self.seconds_ago is not None and self.seconds_ago < ONLINE_SECONDS
+
+
+def launcher_type(provider: str) -> str:
+    """계정 유형 → 실행기 로그인 유형 (넥슨ID / 네이버 / 구글)."""
+    p = (provider or "").strip()
+    if "구글" in p or p.lower().startswith("google"):
+        return "구글"
+    if "네이버" in p or p.lower().startswith("naver"):
+        return "네이버"
+    return "넥슨ID"

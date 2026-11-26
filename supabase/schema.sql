@@ -25,6 +25,8 @@ alter table public.profiles add column if not exists can_view_workplace boolean 
 alter table public.profiles add column if not exists can_view_accounts boolean not null default true;
 -- 관리자에게만 의미 있음: 가입 승인과 팀 배정을 할 수 있는지 (총관리자가 켜 줌)
 alter table public.profiles add column if not exists can_assign_team boolean not null default false;
+-- PC 조종: LD CLOUD 실행기에 명령(시작/재시작/로그인 등)을 보내고 실행기 설정을 바꿀 수 있는지
+alter table public.profiles add column if not exists can_control_pc boolean not null default false;
 
 -- 팀: 이름, 게임 종류, 팀 열쇠 확인값(열쇠가 맞는지 확인하는 암호문)
 create table if not exists public.teams (
@@ -160,7 +162,7 @@ alter table public.profiles drop constraint if exists profiles_role_check;
 update public.profiles set role = 'super'
  where id = (select id from public.profiles where role = 'admin' order by created_at limit 1)
    and not exists (select 1 from public.profiles where role = 'super');
-alter table public.profiles add constraint profiles_role_check check (role in ('super', 'admin', 'worker', 'pending'));
+alter table public.profiles add constraint profiles_role_check check (role in ('super', 'admin', 'worker', 'pending', 'agent'));
 
 -- 팀이 하나도 없으면 '1팀'을 만들고 지금 게임 종류와 팀 암호 확인값을 그대로 쓴다
 insert into public.teams (name, games, key_check)
@@ -208,7 +210,8 @@ begin
     values (new.id,
             coalesce(new.email, ''),
             coalesce(nullif(new.raw_user_meta_data ->> 'display_name', ''), split_part(coalesce(new.email, ''), '@', 1)),
-            case when exists (select 1 from public.profiles where role = 'super') then 'pending' else 'super' end,
+            case when coalesce(new.raw_user_meta_data ->> 'kind', '') = 'agent' then 'agent'
+                 when exists (select 1 from public.profiles where role = 'super') then 'pending' else 'super' end,
             false, false, false, false)
     on conflict (id) do nothing;
     return new;
@@ -268,6 +271,7 @@ language sql stable security definer set search_path = public as $$
             when perm_name = 'edit_pc' then pr.can_edit_pc
             when perm_name = 'view_workplace' then pr.can_view_workplace
             when perm_name = 'view_accounts' then pr.can_view_accounts
+            when perm_name = 'control_pc' then pr.can_control_pc
             else false end
         from profiles pr where pr.id = auth.uid()), false)
 $$;
@@ -395,6 +399,11 @@ $$;
 create or replace function public._pc_label(p_id bigint, p_slot integer) returns text
 language sql stable security definer set search_path = public as $$
     select coalesce((select format('%s번 컴퓨터 %s자리', no, p_slot) from pcs where id = p_id), '컴퓨터#' || p_id)
+$$;
+
+create or replace function public._pc_no_label(p_id bigint) returns text
+language sql stable security definer set search_path = public as $$
+    select coalesce((select format('%s번 컴퓨터', no) from pcs where id = p_id), '컴퓨터#' || p_id)
 $$;
 
 create or replace function public._team_name(t bigint) returns text
@@ -749,6 +758,7 @@ begin
     if not found then raise exception '없는 사용자예요. 새로고침하세요.'; end if;
     if v_id = auth.uid() then raise exception '자기 자신의 역할과 권한은 바꿀 수 없어요.'; end if;
     if v_cur.role = 'super' then raise exception '총관리자는 바꿀 수 없어요.'; end if;
+    if v_cur.role = 'agent' then raise exception 'PC 실행기 계정은 여기서 바꿀 수 없어요.'; end if;
     if v_role is null or v_role not in ('admin', 'worker', 'pending') then raise exception '알 수 없는 역할이에요.'; end if;
 
     select coalesce(array_agg(distinct x::bigint order by x::bigint), '{}') into v_teams
@@ -793,6 +803,8 @@ begin
             then coalesce((p ->> 'can_view_workplace')::boolean, true) else v_cur.can_view_workplace end,
         can_view_accounts = case when v_super or has_perm('view_accounts')
             then coalesce((p ->> 'can_view_accounts')::boolean, true) else v_cur.can_view_accounts end,
+        can_control_pc = case when v_super or has_perm('control_pc')
+            then coalesce((p ->> 'can_control_pc')::boolean, false) else v_cur.can_control_pc end,
         can_assign_team = case when v_super
             then v_role = 'admin' and coalesce((p ->> 'can_assign_team')::boolean, false) else v_cur.can_assign_team end
     where id = v_id;
@@ -994,16 +1006,257 @@ begin
     return n_link;
 end $$;
 
+
+-- ============================================================ PC 실행기 (LD CLOUD 실행기 원격 조종)
+-- 각 PC의 실행기는 스스로 가입(역할 agent)하고, 관리자가 작업장의 컴퓨터와 연결해 준다.
+-- 명령은 pc_commands에 쌓이고 실행기가 가져가서 실행한 뒤 결과를 적는다.
+-- 자리 계정의 아이디/비번은 그 PC 실행기만 열 수 있게 잠가서 pc_creds에 둔다 (1자리 = A, 2자리 = B).
+create table if not exists public.agents (
+    user_id     uuid primary key references public.profiles(id) on delete cascade,
+    pc_id       bigint unique references public.pcs(id) on delete set null,
+    machine     text not null default '',      -- Windows 컴퓨터 이름
+    public_key  text not null default '',      -- 계정 비번을 잠글 때 쓰는 열쇠 (P-256)
+    version     text not null default '',
+    last_seen   timestamptz,
+    state       jsonb not null default '{}'::jsonb,   -- {"busy":true,"job":"A 로그인","last":"..."}
+    devices     jsonb not null default '[]'::jsonb,   -- LD CLOUD 기기 목록 ["이름 #ID", ...]
+    created_at  timestamptz not null default now()
+);
+
+-- 실행기 설정 (열 클라우드, 재시작 옵션, 단축키 등). 작업장 프로그램에서만 바꾼다
+alter table public.pcs add column if not exists agent_settings jsonb not null default '{}'::jsonb;
+
+create table if not exists public.pc_creds (
+    pc_id        bigint not null references public.pcs(id) on delete cascade,
+    slot         integer not null,
+    sealed       text not null,
+    fingerprint  text not null,
+    updated_at   timestamptz not null default now(),
+    primary key (pc_id, slot)
+);
+
+create table if not exists public.pc_commands (
+    id           bigint generated always as identity primary key,
+    pc_id        bigint not null references public.pcs(id) on delete cascade,
+    kind         text not null check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop')),
+    status       text not null default 'queued' check (status in ('queued', 'running', 'done', 'failed', 'cancelled')),
+    result       text not null default '',
+    log          text not null default '',
+    created_by   uuid,
+    created_name text not null default '',
+    created_at   timestamptz not null default now(),
+    started_at   timestamptz,
+    finished_at  timestamptz
+);
+create index if not exists pc_commands_pc_idx on public.pc_commands(pc_id, id);
+
+-- 이 실행기(로그인한 agent)가 연결된 컴퓨터
+create or replace function public._my_agent_pc() returns bigint
+language sql stable security definer set search_path = public as $$
+    select pc_id from agents where user_id = auth.uid()
+$$;
+
+create or replace function public._pc_team(p bigint) returns bigint
+language sql stable security definer set search_path = public as $$
+    select team_id from pcs where id = p
+$$;
+
+-- 이 컴퓨터를 조종할 수 있는지: 같은 팀 + PC 조종 권한
+create or replace function public._can_control(p bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+    select is_super() or (in_team(_pc_team(p)) and has_perm('control_pc'))
+$$;
+
+alter table public.agents       enable row level security;
+alter table public.pc_creds     enable row level security;
+alter table public.pc_commands  enable row level security;
+
+drop policy if exists agents_read on public.agents;
+create policy agents_read on public.agents for select to authenticated
+    using (user_id = auth.uid()
+           or (pc_id is null and is_admin())
+           or (pc_id is not null and (_pc_visible(_pc_team(pc_id)) or _can_control(pc_id))));
+
+drop policy if exists pc_creds_read on public.pc_creds;
+create policy pc_creds_read on public.pc_creds for select to authenticated
+    using (pc_id = _my_agent_pc() or _can_control(pc_id) or is_team_admin(_pc_team(pc_id)));
+
+drop policy if exists pc_commands_read on public.pc_commands;
+create policy pc_commands_read on public.pc_commands for select to authenticated
+    using (pc_id = _my_agent_pc() or _pc_visible(_pc_team(pc_id)) or _can_control(pc_id));
+
+-- 실행기: 처음 켤 때와 열쇠가 바뀔 때 등록
+create or replace function public.agent_register(p_machine text, p_public text, p_version text) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_old agents%rowtype;
+begin
+    if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
+    select * into v_old from agents where user_id = auth.uid();
+    insert into agents (user_id, machine, public_key, version, last_seen)
+    values (auth.uid(), coalesce(p_machine, ''), coalesce(p_public, ''), coalesce(p_version, ''), now())
+    on conflict (user_id) do update set machine = excluded.machine, public_key = excluded.public_key,
+        version = excluded.version, last_seen = now();
+    -- 열쇠가 바뀌면 예전 열쇠로 잠근 계정은 못 여니 지운다 (작업장 프로그램이 다시 잠가서 올림)
+    if v_old.pc_id is not null and v_old.public_key is distinct from p_public then
+        delete from pc_creds where pc_id = v_old.pc_id;
+    end if;
+end $$;
+
+-- 실행기: 주기적으로 상태를 알리고, 설정과 다음 명령을 받는다
+-- 돌려주는 값: {"pc_id":..,"pc_no":..,"pc_name":..,"settings":{..},"creds":"지문들","command":{"id":..,"kind":".."} 또는 null}
+create or replace function public.agent_sync(p_state jsonb, p_devices jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+    v_ag  agents%rowtype;
+    v_pc  pcs%rowtype;
+    v_cmd pc_commands%rowtype;
+begin
+    if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
+    update agents set last_seen = now(), state = coalesce(p_state, state),
+        devices = case when p_devices is null or jsonb_typeof(p_devices) <> 'array' or jsonb_array_length(p_devices) = 0
+                       then devices else p_devices end
+    where user_id = auth.uid() returning * into v_ag;
+    if not found then raise exception '먼저 등록해야 해요.'; end if;
+    if v_ag.pc_id is null then return jsonb_build_object('pc_id', null); end if;
+    select * into v_pc from pcs where id = v_ag.pc_id;
+    -- 대기 중인 명령 하나를 가져가며 '실행 중'으로 (중지 명령이 있으면 그것 먼저)
+    select * into v_cmd from pc_commands
+     where pc_id = v_ag.pc_id and status = 'queued'
+     order by (kind = 'stop') desc, id limit 1 for update skip locked;
+    if found then
+        update pc_commands set status = 'running', started_at = now() where id = v_cmd.id;
+    end if;
+    return jsonb_build_object(
+        'pc_id', v_pc.id, 'pc_no', v_pc.no, 'pc_name', v_pc.name, 'ld_cloud', v_pc.ld_cloud,
+        'settings', v_pc.agent_settings,
+        'creds', coalesce((select string_agg(slot || ':' || fingerprint, ',' order by slot) from pc_creds where pc_id = v_pc.id), ''),
+        'command', case when v_cmd.id is null then null else jsonb_build_object('id', v_cmd.id, 'kind', v_cmd.kind) end);
+end $$;
+
+-- 실행기: 명령 진행 상황/결과 적기 (p_log는 덧붙일 줄)
+create or replace function public.agent_report(p_id bigint, p_status text, p_result text, p_log text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+    if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
+    if p_status not in ('running', 'done', 'failed', 'cancelled') then raise exception '알 수 없는 상태예요.'; end if;
+    update pc_commands set
+        status = p_status,
+        result = coalesce(p_result, result),
+        log = right(log || coalesce(p_log, ''), 20000),
+        finished_at = case when p_status in ('done', 'failed', 'cancelled') then now() else finished_at end
+    where id = p_id and pc_id = _my_agent_pc();
+end $$;
+
+-- 관리자: 실행기를 작업장 컴퓨터에 연결 (p_pc = null 이면 연결 끊기)
+create or replace function public.link_agent(p_agent uuid, p_pc bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+    v_ag   agents%rowtype;
+    v_team bigint;
+begin
+    select * into v_ag from agents where user_id = p_agent for update;
+    if not found then raise exception '없는 실행기예요. 새로고침하세요.'; end if;
+    if v_ag.pc_id is not null and not is_team_admin(_pc_team(v_ag.pc_id)) then
+        raise exception '이 실행기는 다른 팀 컴퓨터에 연결돼 있어요.';
+    end if;
+    if p_pc is not null then
+        v_team := _pc_team(p_pc);
+        if v_team is null then raise exception '없는 컴퓨터예요.'; end if;
+        if not is_team_admin(v_team) then raise exception '이 팀 관리자만 연결할 수 있어요.'; end if;
+        update agents set pc_id = null where pc_id = p_pc and user_id <> p_agent;  -- 예전 실행기는 연결 끊음
+    elsif not is_admin() then
+        raise exception '관리자만 할 수 있어요.';
+    end if;
+    if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
+    if p_pc is not null then delete from pc_creds where pc_id = p_pc; end if;
+    update agents set pc_id = p_pc where user_id = p_agent;
+    perform _log(case when p_pc is null then '실행기 연결 끊기' else '실행기 연결' end,
+                 v_ag.machine || coalesce(' → ' || _pc_no_label(p_pc), ''), coalesce(v_team, _pc_team(v_ag.pc_id)));
+end $$;
+
+-- 관리자: 연결 안 된 실행기 지우기 (잘못 등록된 것)
+create or replace function public.forget_agent(p_agent uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_ag agents%rowtype;
+begin
+    select * into v_ag from agents where user_id = p_agent;
+    if not found then return; end if;
+    if v_ag.pc_id is not null then raise exception '컴퓨터에 연결된 실행기는 먼저 연결을 끊으세요.'; end if;
+    if not is_admin() then raise exception '관리자만 할 수 있어요.'; end if;
+    delete from agents where user_id = p_agent;
+end $$;
+
+-- PC 조종: 명령 보내기
+create or replace function public.send_pc_command(p_pc bigint, p_kind text) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare v_id bigint;
+begin
+    if not _can_control(p_pc) then raise exception 'PC 조종 권한이 없어요.'; end if;
+    if not exists (select 1 from agents where pc_id = p_pc) then raise exception '이 컴퓨터에 연결된 실행기가 없어요.'; end if;
+    if p_kind = 'stop' then
+        update pc_commands set status = 'cancelled', finished_at = now(), result = '중지 요청으로 취소'
+         where pc_id = p_pc and status = 'queued';
+    elsif exists (select 1 from pc_commands where pc_id = p_pc and status = 'queued' and kind = p_kind) then
+        raise exception '같은 명령이 이미 기다리고 있어요.';
+    end if;
+    insert into pc_commands (pc_id, kind, created_by, created_name)
+    values (p_pc, p_kind, auth.uid(), coalesce((select display_name from profiles where id = auth.uid()), ''))
+    returning id into v_id;
+    perform _log('PC 명령', _pc_no_label(p_pc) || ' ' || p_kind, _pc_team(p_pc));
+    return v_id;
+end $$;
+
+-- PC 조종: 실행기 설정 바꾸기
+create or replace function public.set_agent_settings(p_pc bigint, p jsonb) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+    if not _can_control(p_pc) then raise exception 'PC 조종 권한이 없어요.'; end if;
+    if jsonb_typeof(p) <> 'object' then raise exception '설정 형식이 잘못됐어요.'; end if;
+    update pcs set agent_settings = p, updated_at = now() where id = p_pc;
+    perform _log('실행기 설정', _pc_no_label(p_pc), _pc_team(p_pc));
+end $$;
+
+-- 자리 계정을 그 PC 실행기 열쇠로 잠가서 올리기 (작업장 프로그램이 자동으로 함). p_sealed = '' 이면 지움
+create or replace function public.set_pc_creds(p_pc bigint, p_slot integer, p_sealed text, p_fp text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+    if not (_can_control(p_pc) or is_team_admin(_pc_team(p_pc))) then raise exception 'PC 조종 권한이 없어요.'; end if;
+    if coalesce(p_sealed, '') = '' then
+        delete from pc_creds where pc_id = p_pc and slot = p_slot;
+    else
+        insert into pc_creds (pc_id, slot, sealed, fingerprint) values (p_pc, p_slot, p_sealed, p_fp)
+        on conflict (pc_id, slot) do update set sealed = excluded.sealed, fingerprint = excluded.fingerprint, updated_at = now();
+    end if;
+end $$;
+
+-- 실행기: 잠긴 자리 계정 받기
+create or replace function public.agent_creds() returns jsonb
+language sql stable security definer set search_path = public as $$
+    select coalesce(jsonb_agg(jsonb_build_object('slot', slot, 'sealed', sealed, 'fingerprint', fingerprint) order by slot), '[]'::jsonb)
+      from pc_creds where pc_id = _my_agent_pc() and my_role() = 'agent'
+$$;
+
+-- 실행기가 명령을 바로 알 수 있게 (Supabase Realtime). 시험용 DB처럼 없으면 건너뛴다
+do $$
+begin
+    if exists (select 1 from pg_publication where pubname = 'supabase_realtime')
+       and not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'pc_commands') then
+        alter publication supabase_realtime add table public.pc_commands;
+    end if;
+end $$;
+
 -- ============================================================ 테이블 접근 권한
 -- 프로젝트 생성 시 'Grant API access to new tables automatically'를 끈 경우에도 동작하도록 직접 지정한다.
 -- 로그인한 사용자(authenticated)는 읽기만 가능(실제로 보이는 행은 위의 RLS가 결정), 로그인 안 한 사용자(anon)는 접근 불가.
 grant usage on schema public to authenticated;
 revoke all on public.profiles, public.teams, public.team_master, public.team_members, public.user_keys,
               public.user_secrets, public.team_keys, public.pcs, public.accounts, public.characters,
-              public.assignments, public.audit_log, public.app_settings from anon, authenticated;
+              public.assignments, public.audit_log, public.app_settings,
+              public.agents, public.pc_creds, public.pc_commands from anon, authenticated;
 grant select on public.profiles, public.teams, public.team_master, public.team_members, public.user_keys,
                 public.user_secrets, public.team_keys, public.pcs, public.accounts, public.characters,
-                public.assignments, public.audit_log, public.app_settings to authenticated;
+                public.assignments, public.audit_log, public.app_settings,
+                public.agents, public.pc_creds, public.pc_commands to authenticated;
 
 -- ============================================================ 실행 권한
 revoke execute on all functions in schema public from public, anon;
@@ -1020,5 +1273,9 @@ grant execute on function
     public.delete_team(bigint), public.set_team_secret(bigint, text, text),
     public.register_key(text, text, text), public.grant_team_key(bigint, uuid, text, text),
     public.set_team_key(text, text), public.set_games(bigint, jsonb),
-    public.last_change(bigint), public.import_data(bigint, jsonb)
+    public.last_change(bigint), public.import_data(bigint, jsonb),
+    public._my_agent_pc(), public._pc_team(bigint), public._can_control(bigint),
+    public.agent_register(text, text, text), public.agent_sync(jsonb, jsonb), public.agent_report(bigint, text, text, text),
+    public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text),
+    public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds()
 to authenticated;

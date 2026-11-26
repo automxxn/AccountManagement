@@ -9,14 +9,16 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import datetime, timezone
 
 import httpx
 
 from . import logsetup
-from .crypto import Cipher, derive_key, new_key, new_keypair, new_salt, public_of, seal, unseal
+from .crypto import Cipher, derive_key, new_key, new_keypair, new_salt, pc_seal, public_of, seal, unseal
 from .db import ConflictError, RepoError, bans_from_json, bans_to_json
-from .models import DEFAULT_GAMES, PC, Account, Ban, Character, Location, Profile, Team
+from .models import DEFAULT_GAMES, PC, Account, Agent, Ban, Character, Location, Profile, Team, launcher_type
 
 LOGIN_DOMAIN = "acctmgr.app"
 
@@ -375,6 +377,7 @@ class CloudRepository:
                        can_view_workplace=r.get("can_view_workplace", True),
                        can_view_accounts=r.get("can_view_accounts", True),
                        can_assign_team=r.get("can_assign_team", False),
+                       can_control_pc=r.get("can_control_pc", False),
                        teams=sorted(m["team_id"] for m in (r.get("team_members") or [])))
 
     def _account_payload(self, a: Account, encrypt: bool = True) -> dict:
@@ -401,7 +404,8 @@ class CloudRepository:
             pcs[r["id"]] = PC(id=r["id"], no=r["no"], name=r["name"], remote_t=r["remote_t"],
                               anydesk_id=r["anydesk_id"], anydesk_pw=self._dec(r["anydesk_pw"]), vpn=r["vpn"],
                               ld_cloud=r["ld_cloud"], slot_count=r["slot_count"], note=r["note"],
-                              version=r["version"], worker_id=r["worker_id"], slots=[None] * r["slot_count"])
+                              version=r["version"], worker_id=r["worker_id"], slots=[None] * r["slot_count"],
+                              agent_settings=r.get("agent_settings") or {})
         for r in self._get("assignments", {"select": "pc_id,slot,account_id"}):
             p = pcs.get(r["pc_id"])
             if p and 1 <= r["slot"] <= len(p.slots):
@@ -443,7 +447,8 @@ class CloudRepository:
 
     def list_workers(self) -> list[Profile]:
         return [self._profile(r) for r in
-                self._get("profiles", {"select": "*,team_members(team_id)", "order": "created_at"})]
+                self._get("profiles", {"select": "*,team_members(team_id)", "order": "created_at"})
+                if r.get("role") != "agent"]  # PC 실행기 계정은 사람 목록에서 뺀다
 
     def list_games(self) -> list[str]:
         if self.team_id is None:
@@ -508,7 +513,8 @@ class CloudRepository:
             "can_add_account": p.can_add_account, "can_edit_account": p.can_edit_account,
             "can_delete_account": p.can_delete_account, "can_edit_pc": p.can_edit_pc,
             "can_view_workplace": p.can_view_workplace, "can_view_accounts": p.can_view_accounts,
-            "can_assign_team": p.can_assign_team, "teams": list(p.teams)}})
+            "can_assign_team": p.can_assign_team, "can_control_pc": p.can_control_pc,
+            "teams": list(p.teams)}})
 
     def bulk_import(self, accounts: list[Account], pcs: list[PC], links: list[tuple[int, int, int]]) -> int:
         """links: (pc_no, slot, accounts 리스트의 인덱스). 기존 데이터는 모두 지운다."""
@@ -518,3 +524,99 @@ class CloudRepository:
             "links": [{"pc_no": no, "slot": slot, "acc": idx} for no, slot, idx in links],
         }
         return int(self._rpc("import_data", {"p_team": self.team_id, "p": payload}) or 0)
+
+    # ------------------------------------------------------------------ PC 실행기 (LD CLOUD 실행기)
+    @staticmethod
+    def _agent(r: dict) -> Agent:
+        seen = r.get("last_seen")
+        ago = None
+        if seen:
+            try:
+                t = datetime.fromisoformat(seen.replace("Z", "+00:00"))
+                ago = (datetime.now(timezone.utc) - t).total_seconds()
+            except ValueError:
+                pass
+        return Agent(user_id=r["user_id"], pc_id=r.get("pc_id"), machine=r.get("machine", ""),
+                     version=r.get("version", ""), public_key=r.get("public_key", ""),
+                     last_seen=(seen or "")[:19].replace("T", " "), seconds_ago=ago,
+                     state=r.get("state") or {}, devices=list(r.get("devices") or []))
+
+    def list_agents(self) -> list[Agent]:
+        return [self._agent(r) for r in self._get("agents", {"select": "*", "order": "machine"})]
+
+    def link_agent(self, agent_id: str, pc_id: int | None) -> None:
+        self._rpc("link_agent", {"p_agent": agent_id, "p_pc": pc_id})
+
+    def forget_agent(self, agent_id: str) -> None:
+        self._rpc("forget_agent", {"p_agent": agent_id})
+
+    def send_command(self, pc_id: int, kind: str) -> int:
+        return int(self._rpc("send_pc_command", {"p_pc": pc_id, "p_kind": kind}))
+
+    def list_commands(self, pc_ids: list[int], limit: int = 200) -> list[dict]:
+        if not pc_ids:
+            return []
+        ids = ",".join(str(i) for i in pc_ids)
+        rows = self._get("pc_commands", {"select": "*", "pc_id": f"in.({ids})", "order": "id.desc",
+                                         "limit": str(limit)})
+        for r in rows:
+            for k in ("created_at", "started_at", "finished_at"):
+                r[k] = _local_time(r.get(k))
+        return rows
+
+    def set_agent_settings(self, pc_id: int, settings: dict) -> None:
+        self._rpc("set_agent_settings", {"p_pc": pc_id, "p": settings})
+
+    def sync_pc_creds(self) -> int:
+        """연결된 PC 실행기에 그 컴퓨터 1·2자리 계정(A·B)을 그 PC만 열 수 있게 잠가서 올린다. 올린/지운 수."""
+        if not (self.me.is_admin or self.me.can("can_control_pc")) or not self.ciphers:
+            return 0
+        agents = [a for a in self.list_agents() if a.pc_id and a.public_key]
+        if not agents:
+            return 0
+        pc_ids = ",".join(str(a.pc_id) for a in agents)
+        pcs = {r["id"]: r["team_id"] for r in self._get("pcs", {"select": "id,team_id", "id": f"in.({pc_ids})"})}
+        have = {(r["pc_id"], r["slot"]): r["fingerprint"]
+                for r in self._get("pc_creds", {"select": "pc_id,slot,fingerprint", "pc_id": f"in.({pc_ids})"})}
+        slots = {(r["pc_id"], r["slot"]): r["account_id"]
+                 for r in self._get("assignments", {"select": "pc_id,slot,account_id", "pc_id": f"in.({pc_ids})"})
+                 if r["slot"] in (1, 2)}
+        acc_ids = ",".join(str(a) for a in set(slots.values())) or "0"
+        accs = {r["id"]: r for r in self._get("accounts", {
+            "select": "id,team_id,provider,login_id,password,version", "id": f"in.({acc_ids})"})}
+        n = 0
+        for ag in agents:
+            team = pcs.get(ag.pc_id)
+            cipher = self.ciphers.get(team)
+            if cipher is None:
+                continue
+            for slot in (1, 2):
+                acc = accs.get(slots.get((ag.pc_id, slot)))
+                old = have.get((ag.pc_id, slot))
+                try:
+                    if acc is None:
+                        if old is not None:
+                            self._rpc("set_pc_creds", {"p_pc": ag.pc_id, "p_slot": slot, "p_sealed": "", "p_fp": ""})
+                            n += 1
+                        continue
+                    fp = hashlib.sha256(f"{acc['id']}:{acc['version']}:{ag.public_key}".encode()).hexdigest()[:24]
+                    if fp == old:
+                        continue
+                    body = json.dumps({"type": launcher_type(acc["provider"]), "id": acc["login_id"],
+                                       "pw": cipher.decrypt(acc["password"])}, ensure_ascii=False).encode("utf-8")
+                    self._rpc("set_pc_creds", {"p_pc": ag.pc_id, "p_slot": slot,
+                                               "p_sealed": pc_seal(body, ag.public_key), "p_fp": fp})
+                    n += 1
+                except (RepoError, ValueError) as e:
+                    logsetup.log.warning("PC 계정 올리기 실패 (%s, %s자리): %s", ag.pc_id, slot, e)
+        return n
+
+
+def _local_time(v: str | None) -> str:
+    """서버 시각(UTC) → 이 PC 시각 'MM-DD HH:MM:SS'."""
+    if not v:
+        return ""
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone().strftime("%m-%d %H:%M:%S")
+    except ValueError:
+        return v[:19]

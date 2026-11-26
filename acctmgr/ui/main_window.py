@@ -14,6 +14,7 @@ from ..importer import import_workbook, snapshot
 from ..models import GAMES, ROLES, set_games
 from ..version import __version__
 from .accounts import AccountsTab
+from .agents import AgentsTab
 from .common import (
     ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
 )
@@ -83,12 +84,16 @@ class MainWindow(QMainWindow):
         self.history = HistoryTab(repo)
         self.workers_tab = WorkersTab(repo) if (self.cloud and me.is_admin) else None
         self.teams_tab = TeamsTab(repo) if (self.cloud and me.is_super) else None
+        # PC 조종: LD CLOUD 실행기에 명령 보내기 (관리자, 또는 'PC 조종' 권한을 받은 사람)
+        self.agents_tab = AgentsTab(repo) if (self.cloud and (me.is_admin or me.can("can_control_pc"))) else None
         # 근무자는 근무자 관리에서 켜 준 메뉴만 보인다 (관리자는 전부)
         self.pages = []
         if me.can("can_view_workplace"):
             self.pages.append(("작업장", self.work))
         if me.can("can_view_accounts"):
             self.pages.append(("계정", self.accounts))
+        if self.agents_tab:
+            self.pages.append(("PC 조종", self.agents_tab))
         self.pages.append(("변경 기록", self.history))
         if self.workers_tab:
             self.pages.append(("근무자 관리", self.workers_tab))
@@ -352,6 +357,12 @@ class MainWindow(QMainWindow):
                 given = 0
             if given:
                 self.statusBar().showMessage(f"{given}명에게 팀 열쇠를 넘겨줬어요.", 8000)
+        if self.agents_tab:
+            # 작업장 자리 계정이 바뀌었으면 그 PC 실행기에 새 계정을 잠가서 올려 둔다 (A/B 로그인용)
+            try:
+                self.repo.sync_pc_creds()
+            except RepoError as e:
+                logsetup.log.warning("PC 계정 올리기 실패: %s", e)
         if QApplication.activeModalWidget():
             return  # 수정 창이 열려 있을 때는 화면을 건드리지 않는다
         try:

@@ -128,6 +128,42 @@ def unseal(sealed: str, private_raw: bytes) -> bytes | None:
         return None
 
 
+# ---------------------------------------------------------------- PC 실행기용 잠금 (P-256)
+# 각 PC의 LD CLOUD 실행기(C#, .NET Framework)가 풀 수 있는 방식: Windows CNG의 P-256 ECDH.
+# 공유 비밀 Z → k = SHA256(Z), 암호 열쇠 = HMAC(k, "enc"), 확인 열쇠 = HMAC(k, "mac")
+# 결과: "pcseal1:" + base64(일회용 공개 X(32) + Y(32) + iv(16) + AES-256-CBC 암호문 + HMAC-SHA256(iv + 암호문)(32))
+PC_SEAL_PREFIX = "pcseal1:"
+
+
+def pc_seal(data: bytes, agent_public_b64: str) -> str:
+    import hashlib
+    import hmac as _hmac
+
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers import Cipher as _C, algorithms, modes
+
+    raw = base64.b64decode(agent_public_b64)
+    if len(raw) != 64:
+        raise ValueError("실행기 공개 열쇠 형식이 잘못됐어요.")
+    peer = ec.EllipticCurvePublicNumbers(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"),
+                                         ec.SECP256R1()).public_key()
+    eph = ec.generate_private_key(ec.SECP256R1())
+    z = eph.exchange(ec.ECDH(), peer)
+    k = hashlib.sha256(z).digest()
+    enc_key = _hmac.new(k, b"enc", hashlib.sha256).digest()
+    mac_key = _hmac.new(k, b"mac", hashlib.sha256).digest()
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    body = padder.update(data) + padder.finalize()
+    e = _C(algorithms.AES(enc_key), modes.CBC(iv)).encryptor()
+    ct = e.update(body) + e.finalize()
+    tag = _hmac.new(mac_key, iv + ct, hashlib.sha256).digest()
+    nums = eph.public_key().public_numbers()
+    epub = nums.x.to_bytes(32, "big") + nums.y.to_bytes(32, "big")
+    return PC_SEAL_PREFIX + base64.b64encode(epub + iv + ct + tag).decode()
+
+
 # ---------------------------------------------------------------- Windows DPAPI
 class _Blob(ctypes.Structure):
     _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
