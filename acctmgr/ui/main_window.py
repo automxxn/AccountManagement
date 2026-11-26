@@ -342,8 +342,18 @@ class MainWindow(QMainWindow):
         self._safe(go)
 
     def _poll(self) -> None:
+        if self.repo.me.is_admin:
+            # 팀 열쇠를 기다리는 사람이 있으면 넘겨준다 (근무자가 로그인한 뒤 몇 초 안에 받게).
+            # 화면은 건드리지 않으므로 수정 창이 열려 있어도 한다.
+            try:
+                given = self.repo.grant_missing_keys()
+            except RepoError as e:
+                logsetup.log.warning("팀 열쇠 넘겨주기 실패: %s", e)
+                given = 0
+            if given:
+                self.statusBar().showMessage(f"{given}명에게 팀 열쇠를 넘겨줬어요.", 8000)
         if QApplication.activeModalWidget():
-            return  # 수정 창이 열려 있을 때는 건드리지 않는다
+            return  # 수정 창이 열려 있을 때는 화면을 건드리지 않는다
         try:
             n = self.repo.last_change()
         except RepoError as e:

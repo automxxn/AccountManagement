@@ -338,11 +338,60 @@ def _unlock(repo: CloudRepository) -> bool:
     except RepoError:
         pass
     if not repo.usable_teams():
-        QMessageBox.information(None, "열쇠 받기 대기",
-                                "팀 열쇠를 아직 받지 못했어요.\n총관리자나 팀 관리자가 프로그램을 켜 두면 자동으로 넘어와요. "
-                                "잠시 후 다시 실행하세요.")
-        return False
+        return KeyWaitDialog(repo).exec() == QDialog.Accepted
     return True
+
+
+class KeyWaitDialog(QDialog):
+    """팀 열쇠를 받을 때까지 기다린다. 총관리자나 팀 관리자 프로그램이 켜져 있으면 몇 초 안에 넘어온다."""
+
+    CHECK_MS = 4000
+
+    def __init__(self, repo: CloudRepository, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.setWindowTitle("팀 열쇠 받는 중")
+        self.resize(px(420), px(170))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(px(20), px(16), px(20), px(16))
+        msg = QLabel("팀 열쇠를 기다리고 있어요. 받으면 바로 열려요.\n"
+                     "총관리자나 팀 관리자의 프로그램이 켜져 있으면 몇 초 안에 넘어와요.")
+        msg.setWordWrap(True)
+        lay.addWidget(msg)
+        bar = QProgressBar()
+        bar.setRange(0, 0)  # 계속 움직이는 막대
+        bar.setTextVisible(False)
+        bar.setFixedHeight(px(6))
+        lay.addWidget(bar)
+        self.state = muted("")
+        lay.addWidget(self.state)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(button("닫기", "", self.reject))
+        lay.addLayout(row)
+        self.tries = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._check)
+        self.timer.start(self.CHECK_MS)
+
+    def _check(self) -> None:
+        self.tries += 1
+        try:
+            self.repo.reopen_keys()
+        except RepoError as e:
+            self.state.setText(f"서버 확인 중: {e}")
+            return
+        if self.repo.usable_teams():
+            self.timer.stop()
+            self.accept()
+            return
+        if self.tries >= 8:
+            self.state.setText("아직이에요. 총관리자에게 프로그램을 켜 달라고 하세요.")
+
+    def reject(self) -> None:
+        self.timer.stop()
+        super().reject()
 
 
 def cloud_target() -> tuple[str, str] | None:
