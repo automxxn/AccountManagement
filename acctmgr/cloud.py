@@ -560,6 +560,9 @@ class CloudRepository:
         rows = self._get("pc_commands", {"select": "*", "pc_id": f"in.({ids})", "order": "id.desc",
                                          "limit": str(limit)})
         for r in rows:
+            t0, t1, t2 = (_parse_time(r.get(k)) for k in ("created_at", "started_at", "finished_at"))
+            r["pickup_s"] = (t1 - t0).total_seconds() if t0 and t1 else None   # 보낸 뒤 PC가 받기까지
+            r["run_s"] = (t2 - t1).total_seconds() if t1 and t2 else None      # PC에서 실행한 시간
             for k in ("created_at", "started_at", "finished_at"):
                 r[k] = _local_time(r.get(k))
         return rows
@@ -610,6 +613,15 @@ class CloudRepository:
                 except (RepoError, ValueError) as e:
                     logsetup.log.warning("PC 계정 올리기 실패 (%s, %s자리): %s", ag.pc_id, slot, e)
         return n
+
+
+def _parse_time(v: str | None):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _local_time(v: str | None) -> str:

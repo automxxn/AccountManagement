@@ -43,6 +43,23 @@ def _ago(sec: float | None) -> str:
     return f"{sec // 86400}일 전"
 
 
+def _secs(v: float | None) -> str:
+    if v is None:
+        return ""
+    v = max(0.0, v)
+    return f"{v:.1f}초" if v < 10 else (f"{int(v)}초" if v < 120 else f"{int(v // 60)}분 {int(v % 60)}초")
+
+
+def _took(c: dict) -> str:
+    """'받기 0.3초 · 실행 2초' (받기 = 보낸 뒤 PC가 가져가기까지)."""
+    parts = []
+    if c.get("pickup_s") is not None:
+        parts.append("받기 " + _secs(c["pickup_s"]))
+    if c.get("run_s") is not None:
+        parts.append("실행 " + _secs(c["run_s"]))
+    return " · ".join(parts)
+
+
 def _item(text: str, center: bool = False) -> QTableWidgetItem:
     it = QTableWidgetItem(text)
     it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -269,8 +286,8 @@ class AgentsTab(QWidget):
 
         # 아래: 고른 컴퓨터의 명령 기록과 진행 로그
         self.hist_title = muted("컴퓨터를 고르면 명령 기록과 진행 로그가 보여요.")
-        self.hist = QTableWidget(0, 5)
-        self.hist.setHorizontalHeaderLabels(["보낸 시각", "명령", "보낸 사람", "상태", "결과"])
+        self.hist = QTableWidget(0, 6)
+        self.hist.setHorizontalHeaderLabels(["보낸 시각", "명령", "보낸 사람", "상태", "걸린 시간", "결과"])
         self.hist.verticalHeader().setVisible(False)
         style_table(self.hist)
         self.hist.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -391,8 +408,13 @@ class AgentsTab(QWidget):
                 st.setForeground(gray)
                 now = _item("")
             else:
-                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + f"  v{ag.version}")
+                live = (ag.state or {}).get("realtime")
+                speed = "" if not ag.online or live is None else ("  · 즉시" if live else "  · 20초마다")
+                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed + f"  v{ag.version}")
                 st.setForeground(green if ag.online else gray)
+                if live is not None:
+                    st.setToolTip("실시간 연결됨: 명령이 바로 전달돼요" if live else
+                                  "실시간 연결이 안 돼서 20초마다 명령을 확인해요 (실행기 다시 켜기로 다시 시도)")
                 s = ag.state or {}
                 now = _item((("▶ " + s.get("job", "")) if s.get("busy") else s.get("last", "")) or "")
                 now.setToolTip(s.get("last", ""))
@@ -434,7 +456,7 @@ class AgentsTab(QWidget):
         for c, w in enumerate([36, 50, 110, 160, 180, 150, 150, 140, 190, 70]):
             self.table.setColumnWidth(c, px(w))
         self.hist.verticalHeader().setDefaultSectionSize(px(30))
-        for c, w in enumerate([120, 90, 90, 90]):
+        for c, w in enumerate([120, 90, 90, 80, 150]):
             self.hist.setColumnWidth(c, px(w))
         self.pend.verticalHeader().setDefaultSectionSize(px(40))
         for c, w in enumerate([180, 100, 100, 260]):
@@ -501,7 +523,7 @@ class AgentsTab(QWidget):
         self.hist.setRowCount(len(rows))
         for r, c in enumerate(rows):
             vals = [c["created_at"], AGENT_KINDS.get(c["kind"], c["kind"]), c.get("created_name", ""),
-                    COMMAND_STATUS.get(c["status"], c["status"]), c.get("result", "")]
+                    COMMAND_STATUS.get(c["status"], c["status"]), _took(c), c.get("result", "")]
             for k, v in enumerate(vals):
                 it = _item(v)
                 it.setData(Qt.UserRole, c["id"])
