@@ -1,4 +1,4 @@
-"""시작 흐름: 연결 방식 선택 → (클라우드) 로그인 → 팀 암호 풀기."""
+"""시작 흐름: 연결 방식 선택 → (클라우드) 로그인 → 열쇠 풀기 (총관리자: 팀 암호, 나머지: 개인 열쇠)."""
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings, Qt, QTimer
@@ -7,9 +7,10 @@ from PySide6.QtWidgets import (
     QProgressBar, QRadioButton, QVBoxLayout, QWidget,
 )
 
-from ..cloud import CloudRepository
+from ..cloud import CloudRepository, NeedPassword
 from ..crypto import protect_key, unprotect_key
 from ..db import Repository, RepoError
+from ..defaults import built_in
 from .common import T, button, muted, px
 
 SETTINGS = ("AccountManagement", "AccountManagement")
@@ -134,7 +135,8 @@ class LoginDialog(QDialog):
         self.ok_btn = button("로그인", "primary", self._go)
         self.ok_btn.setDefault(True)
         btns = QHBoxLayout()
-        btns.addWidget(button("연결 설정", "", self._connection))
+        if not built_in():  # 배포용 exe에는 연결 정보가 들어 있어서 연결 설정이 필요 없다
+            btns.addWidget(button("연결 설정", "", self._connection))
         btns.addStretch(1)
         btns.addWidget(self.signup)
         btns.addWidget(self.ok_btn)
@@ -257,9 +259,10 @@ class PassphraseDialog(QDialog):
         form.addRow("팀 암호", self.p1)
         if create:
             form.addRow("한 번 더", self.p2)
-        text = ("계정 비번은 이 팀 암호로 잠가서 클라우드에 올려요. 근무자도 처음 한 번 이 암호를 입력해야 비번을 볼 수 있어요.\n"
+        text = ("계정 비번은 팀마다 다른 열쇠로 잠가서 클라우드에 올리고, 그 열쇠들은 이 팀 암호로 잠가 둬요.\n"
+                "팀 암호는 총관리자만 알면 돼요. 관리자와 근무자는 입력하지 않아요.\n"
                 "잃어버리면 저장된 비번을 풀 수 없으니 꼭 따로 적어두세요. (8자 이상)") if create else \
-            "관리자에게 받은 팀 암호를 입력하세요. 이 PC에서는 한 번만 입력하면 돼요."
+            "총관리자 팀 암호를 입력하세요. 이 PC에서는 한 번만 입력하면 돼요."
         hint = muted(text)
         hint.setWordWrap(True)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -284,14 +287,12 @@ class PassphraseDialog(QDialog):
         return self.p1.text()
 
 
-def _unlock(repo: CloudRepository) -> bool:
+def _unlock_super(repo: CloudRepository) -> bool:
+    """총관리자: 팀 암호로 모든 팀 열쇠를 연다."""
     s = settings()
     store_key = "team_key/" + repo.url
     info = repo.team_key_info()
     if info is None:
-        if not repo.me.is_admin:
-            QMessageBox.information(None, "준비 중", "관리자가 아직 팀 암호를 정하지 않았어요. 잠시 후 다시 실행하세요.")
-            return False
         dlg = PassphraseDialog(create=True)
         if not dlg.exec():
             return False
@@ -313,44 +314,93 @@ def _unlock(repo: CloudRepository) -> bool:
         QMessageBox.warning(None, "팀 암호", "팀 암호가 맞지 않아요.")
 
 
+def _personal_key(repo: CloudRepository) -> None:
+    """관리자/근무자(가입 대기 포함): 개인 열쇠를 준비하고 이 PC에 잠가서 저장한다."""
+    s = settings()
+    store_key = f"user_key/{repo.url}/{repo.user_id}"
+    stored = s.value(store_key, "")
+    priv = repo.open_personal_key(unprotect_key(stored) if stored else None)
+    s.setValue(store_key, protect_key(priv))
+
+
+def _unlock(repo: CloudRepository) -> bool:
+    if repo.me.is_super:
+        if not _unlock_super(repo):
+            return False
+    else:
+        _personal_key(repo)
+        if not repo.teams:
+            QMessageBox.information(None, "팀 배정 대기",
+                                    "아직 팀에 배정되지 않았어요.\n총관리자나 관리자가 팀을 정해 주면 사용할 수 있어요.")
+            return False
+    try:
+        repo.grant_missing_keys()  # 내가 관리하는 팀에 새로 들어온 사람에게 팀 열쇠 넘겨주기
+    except RepoError:
+        pass
+    if not repo.usable_teams():
+        QMessageBox.information(None, "열쇠 받기 대기",
+                                "팀 열쇠를 아직 받지 못했어요.\n총관리자나 팀 관리자가 프로그램을 켜 두면 자동으로 넘어와요. "
+                                "잠시 후 다시 실행하세요.")
+        return False
+    return True
+
+
+def cloud_target() -> tuple[str, str] | None:
+    """접속할 (주소, anon 키). 배포용 exe에 들어 있는 값이 있으면 그것을 쓰고, 없으면 연결 설정 값.
+    클라우드를 쓰지 않으면 None."""
+    fixed = built_in()
+    if fixed:
+        return fixed
+    s = settings()
+    if s.value("mode") == "cloud":
+        return s.value("url", ""), s.value("anon_key", "")
+    return None
+
+
 def start_repository():
     """연결 방식에 맞는 저장소를 준비한다. 사용자가 취소하면 None."""
     s = settings()
-    if not s.value("mode", ""):
+    if not built_in() and not s.value("mode", ""):
         if not ConnectionDialog().exec():
             return None
     message = ""
     try_auto = True
     while True:
-        if s.value("mode") != "cloud":
+        target = cloud_target()
+        if target is None:
             return Repository()
-        repo = CloudRepository(s.value("url"), s.value("anon_key"))
+        repo = CloudRepository(*target)
         repo.on_session = lambda token, url=repo.url: save_auto_login(url, token)
         token = stored_token(repo.url) if try_auto else None
         try_auto = False
+        logged_in = False
         if token:
             auto = AutoLoginDialog(repo, token)
             if auto.exec():
-                break
-            if auto.error:
+                logged_in = True
+            elif auto.error:
                 clear_auto_login(repo.url)
                 s.setValue("auto_login", True)  # 다시 로그인하면 또 저장되게
                 message = auto.error
-        result = LoginDialog(repo, message=message).exec()
-        message = ""
-        if result == 2:
+        if not logged_in:
+            result = LoginDialog(repo, message=message).exec()
+            message = ""
+            if result == 2:
+                continue
+            if not result:
+                return None
+        try:
+            if repo.me.role == "pending":
+                _personal_key(repo)  # 승인되면 바로 팀 열쇠를 받을 수 있게 미리 올려 둔다
+                QMessageBox.information(None, "승인 대기",
+                                        f"{repo.me.display_name}님, 가입 요청이 접수됐어요.\n관리자가 승인하면 사용할 수 있어요.")
+                return None
+            if not _unlock(repo):
+                return None
+        except NeedPassword as e:
+            message = str(e)
             continue
-        if not result:
+        except RepoError as e:
+            QMessageBox.warning(None, "오류", str(e))
             return None
-        break
-    if repo.me.role == "pending":
-        QMessageBox.information(None, "승인 대기",
-                                f"{repo.me.display_name}님, 가입 요청이 접수됐어요.\n관리자가 승인하면 사용할 수 있어요.")
-        return None
-    try:
-        if not _unlock(repo):
-            return None
-    except RepoError as e:
-        QMessageBox.warning(None, "오류", str(e))
-        return None
-    return repo
+        return repo

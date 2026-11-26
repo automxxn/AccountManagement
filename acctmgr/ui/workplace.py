@@ -448,7 +448,7 @@ class WorkplaceTab(QWidget):
         self._render_panel()
 
     def _can_edit_pc(self) -> bool:
-        return self.repo.me.is_admin or self.repo.me.can("can_edit_pc")
+        return self.repo.me.can("can_edit_pc")
 
     def _cell_double_clicked(self, r: int, c: int) -> None:
         if r >= len(self._row_map) or not self._row_map[r]:
@@ -552,7 +552,7 @@ class WorkplaceTab(QWidget):
 
     def _pc_tools(self, pc: PC) -> None:
         """패널 맨 위: 이 컴퓨터 수정, 자리 추가/삭제."""
-        can_edit = self.repo.me.is_admin or self.repo.me.can("can_edit_pc")
+        can_edit = self.repo.me.can("can_edit_pc")
         row = QHBoxLayout()
         row.setSpacing(6)
         row.addWidget(button("컴퓨터 수정" if can_edit else "컴퓨터 정보", "", lambda: self.edit_pc(pc)))

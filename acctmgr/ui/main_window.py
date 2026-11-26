@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QStackedWidget, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
@@ -17,8 +17,10 @@ from .accounts import AccountsTab
 from .common import (
     ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
 )
+from ..defaults import built_in
 from .connect import ConnectionDialog, clear_auto_login, settings
 from .update_ui import manual_check
+from .teams import TeamsTab
 from .workers import WorkersTab
 from .sheet import rebuild_columns
 from .workplace import WorkplaceTab
@@ -80,6 +82,7 @@ class MainWindow(QMainWindow):
         self.accounts = AccountsTab(repo)
         self.history = HistoryTab(repo)
         self.workers_tab = WorkersTab(repo) if (self.cloud and me.is_admin) else None
+        self.teams_tab = TeamsTab(repo) if (self.cloud and me.is_super) else None
         # 근무자는 근무자 관리에서 켜 준 메뉴만 보인다 (관리자는 전부)
         self.pages = []
         if me.can("can_view_workplace"):
@@ -90,6 +93,9 @@ class MainWindow(QMainWindow):
         if self.workers_tab:
             self.pages.append(("근무자 관리", self.workers_tab))
             self.workers_tab.changed.connect(self._after_change)
+        if self.teams_tab:
+            self.pages.append(("팀 관리", self.teams_tab))
+            self.teams_tab.changed.connect(self._fill_team_box)
         self.stack = QStackedWidget()
         for _, w in self.pages:
             self.stack.addWidget(w)
@@ -111,7 +117,7 @@ class MainWindow(QMainWindow):
             self.timer = QTimer(self)
             self.timer.timeout.connect(self._poll)
             self.timer.start(POLL_MS)
-        if me.is_admin and repo.is_empty():
+        if me.is_super and repo.is_empty():
             QMessageBox.information(self, "시작하기", "아직 데이터가 없어요.\n왼쪽 아래 메뉴에서 엑셀을 가져오거나 로컬 데이터를 올리세요.")
 
     # ---------------------------------------------------------------- 사이드바
@@ -124,7 +130,15 @@ class MainWindow(QMainWindow):
         lay.setSpacing(6)
         lay.addWidget(label("AccountManagement", "appTitle"))
         lay.addWidget(label(f"v{__version__} · {'클라우드' if self.cloud else '이 PC에 저장'}", "appVersion"))
-        lay.addSpacing(14)
+        lay.addSpacing(10)
+        self.team_box = QComboBox()
+        self.team_box.setToolTip("팀마다 컴퓨터, 계정, 게임 종류가 따로예요")
+        self.team_box.currentIndexChanged.connect(self._team_chosen)
+        if self.cloud:
+            lay.addWidget(muted("팀"))
+            lay.addWidget(self.team_box)
+            self._fill_team_box()
+        lay.addSpacing(10)
 
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
@@ -205,13 +219,14 @@ class MainWindow(QMainWindow):
     def _menu(self) -> QMenu:
         m = QMenu(self)
         me = self.repo.me
-        if me.is_admin:
-            m.addAction("엑셀에서 가져오기...", self._import)
-        if self.cloud and me.is_admin:
+        if me.is_super:
+            m.addAction("엑셀에서 가져오기... (지금 팀으로)", self._import)
+        if self.cloud and me.is_super:
             m.addAction("이 PC의 로컬 데이터를 클라우드로 올리기...", self._upload_local)
         if not self.cloud:
             m.addAction("작업자 이름 바꾸기...", lambda: (self._ask_actor(), self._update_title()))
-        m.addAction("연결 설정... (다시 시작 필요)", self._connection)
+        if not built_in() and (not self.cloud or me.is_super):
+            m.addAction("연결 설정... (다시 시작 필요)", self._connection)
         if self.cloud:
             m.addAction("자동 로그인 끄기", self._auto_login_off)
         m.addSeparator()
@@ -239,6 +254,9 @@ class MainWindow(QMainWindow):
     def _update_title(self) -> None:
         where = "클라우드" if self.cloud else "이 PC"
         role = ROLES.get(self.repo.me.role, "") if self.cloud else "관리자"
+        team = self.repo.team() if self.cloud else None
+        if team:
+            where += f" · {team.name}"
         self.setWindowTitle(f"AccountManagement v{__version__} — {self.repo.actor} ({role}) · {where}")
 
     def _safe(self, fn) -> None:
@@ -264,7 +282,48 @@ class MainWindow(QMainWindow):
         self.work.games_changed()
         self._after_change()
 
+    # ---------------------------------------------------------------- 팀
+    def _fill_team_box(self) -> None:
+        if not self.cloud:
+            return
+        self.team_box.blockSignals(True)
+        self.team_box.clear()
+        for t in self.repo.usable_teams():
+            self.team_box.addItem(t.name, t.id)
+        i = self.team_box.findData(self.repo.team_id)
+        self.team_box.setCurrentIndex(max(i, 0))
+        self.team_box.setEnabled(self.team_box.count() > 1)
+        self.team_box.blockSignals(False)
+
+    def _team_chosen(self, _i: int) -> None:
+        tid = self.team_box.currentData()
+        if tid is None or tid == self.repo.team_id:
+            return
+        try:
+            self.repo.set_team(tid)
+        except RepoError as e:
+            QMessageBox.warning(self, "팀", str(e))
+            return
+        self._update_title()
+        self._load_games()
+        self._games_changed()
+        self.refresh_all()
+
     def refresh_all(self) -> None:
+        if self.cloud:
+            before = self.repo.team_id
+            try:
+                self.repo.reopen_keys()   # 팀이 추가/삭제되거나 열쇠를 새로 받았을 수 있음
+                self.repo.grant_missing_keys()
+            except RepoError as e:
+                logsetup.log.warning("팀 열쇠 확인 실패: %s", e)
+            self._fill_team_box()
+            if self.repo.team_id is None and self.repo.usable_teams() == [] and hasattr(self.repo, "ciphers"):
+                QMessageBox.information(self, "팀", "볼 수 있는 팀이 없어요. 프로그램을 다시 시작하세요.")
+                QApplication.quit()
+                return
+            if self.repo.team_id != before:
+                self._update_title()
         if self._load_games():  # 다른 PC에서 관리자가 게임을 추가한 경우
             self.accounts._build_filters()
 
@@ -313,8 +372,12 @@ class MainWindow(QMainWindow):
         where = "클라우드" if self.cloud else "프로그램"
         return QMessageBox.question(
             self, "데이터 바꾸기",
-            f"지금 {where}에 있는 계정, 컴퓨터, 배정 정보를 모두 지우고 새 내용으로 바꿀까요?\n(변경 기록은 남아요)"
+            f"지금 {where}{self._team_label()}에 있는 계정, 컴퓨터, 배정 정보를 모두 지우고 새 내용으로 바꿀까요?\n(변경 기록은 남아요)"
         ) == QMessageBox.Yes
+
+    def _team_label(self) -> str:
+        t = self.repo.team() if self.cloud else None
+        return f"의 '{t.name}' 팀" if t else ""
 
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "엑셀 파일 선택", "", "Excel (*.xlsx)")

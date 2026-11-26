@@ -408,7 +408,7 @@ class PcDialog(QDialog):
         self.pc = copy.deepcopy(pc) if pc else PC(no=next_no)
         self.deleted = False
         p = self.pc
-        self.can_save = repo.me.is_admin or (pc is not None and repo.me.can("can_edit_pc"))
+        self.can_save = repo.me.is_admin if pc is None else repo.me.can("can_edit_pc")
         self.setWindowTitle(("컴퓨터 수정" if self.can_save else "컴퓨터 정보") if pc else "컴퓨터 추가")
         self.resize(px(460), px(460))
 

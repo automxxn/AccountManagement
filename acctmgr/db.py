@@ -388,6 +388,21 @@ class Repository:
     def save_profile(self, p: Profile) -> None:
         raise RepoError("근무자 관리는 클라우드 모드에서만 쓸 수 있어요.")
 
+    # 팀은 클라우드에만 있다. 이 PC에 저장할 때는 팀 하나처럼 동작한다.
+    team_id = None
+
+    def team(self):
+        return None
+
+    def usable_teams(self) -> list:
+        return []
+
+    def reopen_keys(self) -> None:
+        pass
+
+    def grant_missing_keys(self) -> int:
+        return 0
+
     def bulk_import(self, accounts: list[Account], pcs: list[PC], links: list[tuple[int, int, int]]) -> int:
         """기존 계정/컴퓨터/배정을 모두 지우고 새로 넣는다. links: (pc_no, slot, accounts 인덱스)"""
         with self.conn:

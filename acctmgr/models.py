@@ -248,28 +248,46 @@ PERMS = (
     ("can_delete_account", "계정 삭제"),
     ("can_edit_pc", "컴퓨터 정보 수정"),
 )
-ROLES = {"admin": "관리자", "worker": "근무자", "pending": "승인 대기"}
+ROLES = {"super": "총관리자", "admin": "관리자", "worker": "근무자", "pending": "승인 대기"}
+
+
+@dataclass
+class Team:
+    id: int
+    name: str
+    games: list[str] = field(default_factory=list)
+    key_check: str = ""
 
 
 @dataclass
 class Profile:
+    """권한 단계: 총관리자(super, 전부) > 관리자(admin, 맡은 팀들 + 켜 준 권한) > 근무자(worker, 팀 1개 + 켜 준 권한)."""
     id: str | None = None
     login: str = ""
     display_name: str = "관리자"
-    role: str = "admin"
+    role: str = "super"  # 이 PC에만 저장(로컬)할 때는 혼자 쓰므로 총관리자
     can_add_account: bool = True
     can_edit_account: bool = True
     can_delete_account: bool = True
     can_edit_pc: bool = True
     can_view_workplace: bool = True
     can_view_accounts: bool = True
+    can_assign_team: bool = False   # 관리자만: 가입 승인과 팀 배정
+    teams: list[int] = field(default_factory=list)  # 속한 팀 (근무자 1개, 관리자 여러 개)
+
+    @property
+    def is_super(self) -> bool:
+        return self.role == "super"
 
     @property
     def is_admin(self) -> bool:
-        return self.role == "admin"
+        """관리자 일(근무자 관리, 삭제 승인, 게임 종류, 컴퓨터 추가/삭제)을 할 수 있는지: 총관리자 또는 관리자."""
+        return self.role in ("super", "admin")
 
     def can(self, perm: str) -> bool:
-        return self.is_admin or (self.role == "worker" and bool(getattr(self, perm, False)))
+        if self.is_super:
+            return True
+        return self.role in ("admin", "worker") and bool(getattr(self, perm, False))
 
 
 MAX_PER_OWNER = 2  # 같은 명의자 계정은 작업장 전체에서 최대 2개, 그리고 같은 컴퓨터에만

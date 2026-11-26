@@ -1,7 +1,9 @@
 """비밀번호 암호화.
 
-클라우드에는 계정 비번과 AnyDesk 비번을 '팀 암호'로 암호화한 값만 올린다.
-- 팀 암호 → scrypt로 256비트 키 생성 (salt는 서버 app_settings에 저장)
+클라우드에는 계정 비번과 AnyDesk 비번을 '팀 열쇠'로 암호화한 값만 올린다. 팀마다 열쇠가 다르다.
+- 총관리자의 팀 암호 → scrypt로 256비트 키 생성 (salt는 서버 app_settings에 저장).
+  이 키로 각 팀 열쇠를 잠가 둔다 (1팀은 예전부터 이 키 자체가 팀 열쇠).
+- 관리자/근무자는 개인 열쇠(X25519)로 잠긴 팀 열쇠를 받아서 푼다 (아래 seal/unseal)
 - 각 값은 AES-GCM으로 암호화: "enc1:" + base64(nonce 12바이트 + 암호문)
 - 이 PC에서 한 번 입력한 키는 Windows DPAPI로 잠가서 저장(같은 Windows 사용자만 풀 수 있음)
 """
@@ -13,7 +15,10 @@ import ctypes.wintypes as wt
 import os
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 PREFIX = "enc1:"
@@ -55,6 +60,72 @@ class Cipher:
 
     def verify(self, token: str) -> bool:
         return self.decrypt(token) == CHECK_TEXT
+
+    # 열쇠(바이트)를 이 열쇠로 잠그고 풀기 (팀 열쇠를 팀 암호나 로그인 비밀번호로 잠글 때)
+    def wrap(self, data: bytes) -> str:
+        return self.encrypt(base64.b64encode(data).decode())
+
+    def unwrap(self, box: str) -> bytes | None:
+        if not box or not box.startswith(PREFIX):
+            return None
+        raw = base64.b64decode(box[len(PREFIX):])
+        try:
+            return base64.b64decode(self._aes.decrypt(raw[:12], raw[12:], None))
+        except (InvalidTag, ValueError):
+            return None
+
+
+def new_key() -> bytes:
+    return os.urandom(32)
+
+
+# ---------------------------------------------------------------- 개인 열쇠 (X25519)
+# 각 사람은 열쇠 한 쌍을 가진다. 공개 열쇠는 서버에 올리고, 비공개 열쇠는 본인 PC(DPAPI)와
+# 서버(로그인 비밀번호로 잠가서)에만 둔다. 관리자는 팀 열쇠를 그 사람의 공개 열쇠로 잠가서 넘겨준다.
+SEAL_PREFIX = "seal1:"
+
+
+def new_keypair() -> tuple[bytes, str]:
+    """(비공개 열쇠 32바이트, 공개 열쇠 base64)"""
+    priv = X25519PrivateKey.generate()
+    raw = priv.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                             serialization.NoEncryption())
+    return raw, public_of(raw)
+
+
+def public_of(private_raw: bytes) -> str:
+    pub = X25519PrivateKey.from_private_bytes(private_raw).public_key()
+    return base64.b64encode(pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+
+
+def _seal_key(shared: bytes, eph_pub: bytes, recipient_pub: bytes) -> bytes:
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                info=b"acctmgr-seal" + eph_pub + recipient_pub).derive(shared)
+
+
+def seal(data: bytes, recipient_public_b64: str) -> str:
+    """recipient만 열 수 있게 잠근다 (일회용 열쇠 + X25519 + AES-GCM)."""
+    recipient = base64.b64decode(recipient_public_b64)
+    eph = X25519PrivateKey.generate()
+    eph_pub = eph.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    key = _seal_key(eph.exchange(X25519PublicKey.from_public_bytes(recipient)), eph_pub, recipient)
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, data, None)
+    return SEAL_PREFIX + base64.b64encode(eph_pub + nonce + ct).decode()
+
+
+def unseal(sealed: str, private_raw: bytes) -> bytes | None:
+    if not sealed or not sealed.startswith(SEAL_PREFIX):
+        return None
+    try:
+        raw = base64.b64decode(sealed[len(SEAL_PREFIX):])
+        eph_pub, nonce, ct = raw[:32], raw[32:44], raw[44:]
+        priv = X25519PrivateKey.from_private_bytes(private_raw)
+        mine = base64.b64decode(public_of(private_raw))
+        key = _seal_key(priv.exchange(X25519PublicKey.from_public_bytes(eph_pub)), eph_pub, mine)
+        return AESGCM(key).decrypt(nonce, ct, None)
+    except (InvalidTag, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- Windows DPAPI
