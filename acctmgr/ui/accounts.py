@@ -5,7 +5,7 @@ from collections import Counter
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox, QPushButton,
+    QAbstractItemView, QButtonGroup, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -18,7 +18,7 @@ from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap
 COLUMNS = ACCOUNT_COLUMNS
 COL_WORKER = ACC_WORKER  # 담당은 맨 오른쪽
 CHAR_COLS = ACC_CHAR     # 누르면 캐릭터 창
-FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심"]
+FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심", "삭제 요청"]
 
 
 class AccountsTab(QWidget):
@@ -36,6 +36,13 @@ class AccountsTab(QWidget):
         if me.can("can_add_account"):
             right.append(button("+ 계정 추가", "primary", self._add))
         header = page_header("계정", "가지고 있는 모든 계정과 지금 어디에 들어 있는지 보여줘요", right)
+        # 관리자: 근무자의 삭제 요청 알림
+        self.req_banner = QLabel()
+        self.req_banner.setObjectName("hintBox")
+        self.req_banner.setTextFormat(Qt.RichText)
+        self.req_banner.setCursor(Qt.PointingHandCursor)
+        self.req_banner.setVisible(False)
+        self.req_banner.mousePressEvent = lambda e: self.filter_btns["삭제 요청"].click()
 
         self.filter_group = QButtonGroup(self)
         self.filter_btns: dict[str, QPushButton] = {}
@@ -102,12 +109,18 @@ class AccountsTab(QWidget):
         brow.addSpacing(12)
         brow.addWidget(button("수정" if me.can("can_edit_account") else "정보 보기", "", self._edit))
         if me.can("can_delete_account"):
-            brow.addWidget(button("삭제", "danger", self._delete))
+            brow.addWidget(button("삭제" if me.is_admin else "삭제 요청", "danger", self._delete))
+        if me.is_admin and repo.is_cloud:
+            self.approve_btn = button("삭제 승인", "danger", self._approve, "근무자가 요청한 삭제를 확정해요 (되돌릴 수 없음)")
+            self.reject_btn = button("삭제 거절", "", self._reject, "요청을 취소해서 근무자 화면에 다시 보이게 해요")
+            brow.addWidget(self.approve_btn)
+            brow.addWidget(self.reject_btn)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(14)
         lay.addWidget(header)
+        lay.addWidget(self.req_banner)
         lay.addLayout(frow)
         lay.addWidget(self.table, 1)
         lay.addLayout(brow)
@@ -131,7 +144,13 @@ class AccountsTab(QWidget):
             "플래닛정지": sum(1 for a in self.accs if a.pl_ban.active()),
             "탈퇴": sum(1 for a in self.accs if a.withdrawn),
             "중복 의심": len(self.dups),
+            "삭제 요청": sum(1 for a in self.accs if a.delete_requested),
         }
+        self.filter_btns["삭제 요청"].setVisible(self.repo.me.is_admin and self.repo.is_cloud)
+        req = n["삭제 요청"]
+        self.req_banner.setVisible(bool(req) and self.repo.me.is_admin)
+        self.req_banner.setText(f"<b>근무자가 삭제를 요청한 계정이 {req}개 있어요.</b> "
+                                f"눌러서 확인하고, 계정을 고른 뒤 아래 <b>삭제 승인</b> 또는 <b>삭제 거절</b>을 누르세요.")
         for name, b in self.filter_btns.items():
             b.setText(f"{name} {n[name]}")
         self._render()
@@ -146,6 +165,7 @@ class AccountsTab(QWidget):
             "플래닛정지": lambda a: a.pl_ban.active(),
             "탈퇴": lambda a: a.withdrawn,
             "중복 의심": lambda a: a.id in self.dups,
+            "삭제 요청": lambda a: a.delete_requested,
         }.get(f, lambda a: True)
         out = [a for a in self.accs if test(a) and (not q or q in a.search_text())]
         # 사용중 → 사용가능 → 탈퇴 순, 그 안에서는 명의자순
@@ -198,6 +218,15 @@ class AccountsTab(QWidget):
         a = self._current()
         if not a:
             return
+        if self.repo.is_cloud and not self.repo.me.is_admin:
+            msg = (f"[{a.provider}] {a.login_id} ({a.owner}) 계정 삭제를 요청할까요?\n"
+                   "목록에서는 바로 사라지고, 관리자가 승인하면 완전히 지워져요.\n"
+                   "관리자가 거절하면 다시 나타나요.")
+            if QMessageBox.question(self, "삭제 요청", msg) == QMessageBox.Yes:
+                if run_safely(self, self.repo.delete_account, a.id):
+                    self.refresh()
+                    self.changed.emit()
+            return
         msg = f"[{a.provider}] {a.login_id} ({a.owner}) 계정을 삭제할까요?\n삭제하면 되돌릴 수 없어요."
         if a.location:
             msg += f"\n{a.location.text()}에서도 빠져요."
@@ -206,6 +235,29 @@ class AccountsTab(QWidget):
             if run_safely(self, self.repo.delete_account, a.id):
                 self.refresh()
                 self.changed.emit()
+
+    def _approve(self) -> None:
+        a = self._current()
+        if not a or not a.delete_requested:
+            QMessageBox.information(self, "삭제 승인", "'삭제 요청' 상태인 계정을 고르세요.")
+            return
+        if QMessageBox.question(self, "삭제 승인",
+                                f"[{a.provider}] {a.login_id} ({a.owner}) 계정을 완전히 삭제할까요?\n되돌릴 수 없어요.") \
+                == QMessageBox.Yes and run_safely(self, self.repo.approve_delete, a.id):
+            self.refresh()
+            self.changed.emit()
+
+    def _reject(self) -> None:
+        a = self._current()
+        if not a or not a.delete_requested:
+            QMessageBox.information(self, "삭제 거절", "'삭제 요청' 상태인 계정을 고르세요.")
+            return
+        if run_safely(self, self.repo.reject_delete, a.id):
+            QMessageBox.information(self, "삭제 거절",
+                                    "삭제 요청을 거절했어요. 근무자 화면에 다시 보여요.\n"
+                                    "원래 들어 있던 자리가 비어 있으면 그 자리로 되돌려 놓았어요.")
+            self.refresh()
+            self.changed.emit()
 
     def _copy(self, what: str) -> None:
         a = self._current()

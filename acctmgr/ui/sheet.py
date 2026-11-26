@@ -41,7 +41,8 @@ def _nick(cs) -> str:
 
 def account_values(a: Account, show_pw: bool, worker_names: dict) -> list[str]:
     mr, pl = a.chars("메랜"), a.chars("플래닛")
-    vals = ["● 탈퇴" if a.withdrawn else ("● " + a.status), a.owner, a.contact, a.provider, a.login_id,
+    status = "● 삭제 요청" if a.delete_requested else ("● 탈퇴" if a.withdrawn else ("● " + a.status))
+    vals = [status, a.owner, a.contact, a.provider, a.login_id,
             a.password if show_pw else ("●" * 6 if a.password else ""), a.tag,
             _nick(mr), mr[0].lj if mr else "", _nick(pl), pl[0].lj if pl else "",
             ban_text(a.mr_ban), ban_text(a.pl_ban),
@@ -63,9 +64,9 @@ def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, s
             it.setData(role, val)
         color = None
         if i == 0:
-            color = status_color("탈퇴" if a.withdrawn else a.status)
+            color = T("danger") if a.delete_requested else status_color("탈퇴" if a.withdrawn else a.status)
             it.setFont(bold)
-        elif a.withdrawn:
+        elif a.withdrawn or a.delete_requested:
             color = T("faint")
         elif i in ACC_BAN and v:
             color = T("danger")
@@ -79,6 +80,8 @@ def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, s
             it.setForeground(QColor(color))
         if a.withdrawn:
             it.setToolTip("탈퇴한 계정 (작업장에 넣을 수 없어요)")
+        if a.delete_requested:
+            it.setToolTip(f"근무자가 삭제를 요청했어요 ({a.delete_requested_at}). 아래 '삭제 승인'/'삭제 거절'로 처리하세요.")
         table.setItem(row, offset + i, it)
 
 

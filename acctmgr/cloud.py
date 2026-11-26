@@ -206,7 +206,9 @@ class CloudRepository:
             pcs[r["id"]] = PC(id=r["id"], no=r["no"], name=r["name"], remote_t=r["remote_t"],
                               anydesk_id=r["anydesk_id"], anydesk_pw=self._dec(r["anydesk_pw"]), vpn=r["vpn"],
                               ld_cloud=r["ld_cloud"], slot_count=r["slot_count"], note=r["note"],
-                              version=r["version"], worker_id=r["worker_id"], slots=[None] * r["slot_count"])
+                              version=r["version"], worker_id=r["worker_id"],
+                delete_requested_at=(r.get("delete_requested_at") or "")[:16].replace("T", " "),
+                delete_requested_by=r.get("delete_requested_by"), slots=[None] * r["slot_count"])
         for r in self._get("assignments", {"select": "pc_id,slot,account_id"}):
             p = pcs.get(r["pc_id"])
             if p and 1 <= r["slot"] <= len(p.slots):
@@ -259,7 +261,14 @@ class CloudRepository:
         return acc.id
 
     def delete_account(self, account_id: int) -> None:
+        """관리자는 바로 삭제, 근무자는 삭제 요청 (서버가 구분)."""
         self._rpc("delete_account", {"p_id": account_id})
+
+    def approve_delete(self, account_id: int) -> None:
+        self._rpc("approve_delete", {"p_id": account_id})
+
+    def reject_delete(self, account_id: int) -> None:
+        self._rpc("reject_delete", {"p_id": account_id})
 
     def save_pc(self, pc: PC, log: bool = True) -> int:
         pc.id = int(self._rpc("save_pc", {"p": self._pc_payload(pc)}))

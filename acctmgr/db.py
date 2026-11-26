@@ -338,6 +338,12 @@ class Repository:
     def is_empty(self) -> bool:
         return not self.conn.execute("SELECT 1 FROM accounts UNION SELECT 1 FROM pcs LIMIT 1").fetchone()
 
+    def approve_delete(self, account_id: int) -> None:
+        self.delete_account(account_id)
+
+    def reject_delete(self, account_id: int) -> None:
+        pass
+
     def last_change(self) -> int:
         return self.conn.execute("SELECT COALESCE(MAX(id), 0) FROM audit_log").fetchone()[0]
 

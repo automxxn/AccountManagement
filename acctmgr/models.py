@@ -111,6 +111,8 @@ class Account:
     characters: list[Character] = field(default_factory=list)
     version: int = 0
     worker_id: str | None = None  # 담당 근무자 (클라우드)
+    delete_requested_at: str = ""          # 근무자가 삭제 요청한 시각 (관리자 승인 대기)
+    delete_requested_by: str | None = None
     location: Location | None = None  # 조회 시 채워짐
 
     def chars(self, game: str) -> list[Character]:
@@ -160,9 +162,13 @@ class Account:
         return self.mr_ban.active() and self.pl_ban.active()
 
     @property
+    def delete_requested(self) -> bool:
+        return bool(self.delete_requested_at)
+
+    @property
     def assignable(self) -> bool:
-        """빈 자리에 넣을 수 있는지 (자리에 없고 탈퇴하지 않음)."""
-        return not self.location and not self.withdrawn
+        """빈 자리에 넣을 수 있는지 (자리에 없고, 탈퇴하지 않았고, 삭제 요청 중이 아님)."""
+        return not self.location and not self.withdrawn and not self.delete_requested
 
     @property
     def owner_key(self) -> str:

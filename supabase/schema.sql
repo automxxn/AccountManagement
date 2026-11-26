@@ -56,6 +56,12 @@ create table if not exists public.accounts (
     unique (provider, login_key)
 );
 
+-- 근무자가 삭제하면 바로 지우지 않고 '삭제 요청'으로 표시 → 관리자가 승인해야 진짜 삭제
+alter table public.accounts add column if not exists delete_requested_at timestamptz;
+alter table public.accounts add column if not exists delete_requested_by uuid references public.profiles(id) on delete set null;
+alter table public.accounts add column if not exists delete_prev_pc bigint;
+alter table public.accounts add column if not exists delete_prev_slot integer;
+
 create table if not exists public.characters (
     id          bigint generated always as identity primary key,
     account_id  bigint not null references public.accounts(id) on delete cascade,
@@ -141,7 +147,8 @@ $$;
 create or replace function public.can_see_account(a_id bigint) returns boolean
 language sql stable security definer set search_path = public as $$
     select is_admin()
-        or (is_member() and exists (select 1 from accounts a where a.id = a_id and a.worker_id = auth.uid()))
+        or (is_member() and exists (select 1 from accounts a
+                                    where a.id = a_id and a.worker_id = auth.uid() and a.delete_requested_at is null))
 $$;
 
 create or replace function public.owns_pc(p_id bigint) returns boolean
@@ -235,6 +242,10 @@ begin
         v_worker := case when is_admin() then nullif(p ->> 'worker_id', '')::uuid else v_cur.worker_id end;
     end if;
 
+    if exists (select 1 from accounts where provider = v_prov and login_key = v_key and id is distinct from v_id
+               and delete_requested_at is not null) then
+        raise exception '같은 아이디가 삭제 요청 중이에요. 관리자가 승인하거나 거절한 뒤 다시 시도하세요.';
+    end if;
     if exists (select 1 from accounts where provider = v_prov and login_key = v_key and id is distinct from v_id) then
         raise exception '같은 아이디가 이미 등록돼 있어요: [%] %', v_prov, trim(p ->> 'login_id');
     end if;
@@ -279,14 +290,67 @@ end $$;
 
 create or replace function public.delete_account(p_id bigint) returns void
 language plpgsql security definer set search_path = public as $$
-declare v_label text;
+declare
+    v_label text;
+    v_where record;
 begin
     if not (is_admin() or (can_see_account(p_id) and has_perm('delete_account'))) then
         raise exception '이 계정을 삭제할 권한이 없어요.';
     end if;
     v_label := _acc_label(p_id);
+    if is_admin() then
+        delete from accounts where id = p_id;
+        perform _log('계정 삭제', v_label);
+        return;
+    end if;
+    -- 근무자: 삭제 요청으로 표시하고 자리에서 뺀다 (거절되면 비어 있을 때 원래 자리로 돌아감)
+    select pc_id, slot into v_where from assignments where account_id = p_id;
+    update accounts set delete_requested_at = now(), delete_requested_by = auth.uid(),
+        delete_prev_pc = v_where.pc_id, delete_prev_slot = v_where.slot,
+        version = version + 1, updated_at = now()
+    where id = p_id;
+    delete from assignments where account_id = p_id;
+    perform _log('삭제 요청', v_label);
+end $$;
+
+create or replace function public.approve_delete(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_label text;
+begin
+    if not is_admin() then raise exception '관리자만 할 수 있어요.'; end if;
+    if not exists (select 1 from accounts where id = p_id and delete_requested_at is not null) then
+        raise exception '삭제 요청이 없는 계정이에요. 새로고침하세요.';
+    end if;
+    v_label := _acc_label(p_id);
     delete from accounts where id = p_id;
-    perform _log('계정 삭제', v_label);
+    perform _log('삭제 승인', v_label);
+end $$;
+
+create or replace function public.reject_delete(p_id bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+    v_acc  accounts%rowtype;
+    v_back text := '';
+begin
+    if not is_admin() then raise exception '관리자만 할 수 있어요.'; end if;
+    select * into v_acc from accounts where id = p_id and delete_requested_at is not null;
+    if not found then raise exception '삭제 요청이 없는 계정이에요. 새로고침하세요.'; end if;
+    update accounts set delete_requested_at = null, delete_requested_by = null,
+        delete_prev_pc = null, delete_prev_slot = null, version = version + 1, updated_at = now()
+    where id = p_id;
+    -- 원래 자리가 아직 비어 있으면 되돌려 놓는다
+    if v_acc.delete_prev_pc is not null
+       and exists (select 1 from pcs where id = v_acc.delete_prev_pc and slot_count >= v_acc.delete_prev_slot)
+       and not exists (select 1 from assignments where pc_id = v_acc.delete_prev_pc and slot = v_acc.delete_prev_slot) then
+        begin
+            perform _check_owner_rule(p_id, v_acc.delete_prev_pc);
+            insert into assignments (pc_id, slot, account_id) values (v_acc.delete_prev_pc, v_acc.delete_prev_slot, p_id);
+            v_back := ' (원래 자리 ' || _pc_label(v_acc.delete_prev_pc, v_acc.delete_prev_slot) || '로 되돌림)';
+        exception when others then
+            v_back := ' (원래 자리로는 못 돌아감)';
+        end;
+    end if;
+    perform _log('삭제 거절', _acc_label(p_id) || v_back);
 end $$;
 
 -- ============================================================ 컴퓨터
@@ -402,6 +466,7 @@ begin
     if not found then raise exception '없는 계정이에요. 새로고침한 뒤 다시 시도하세요.'; end if;
     if not (is_admin() or v_acc.worker_id = auth.uid()) then raise exception '담당 계정이 아니에요.'; end if;
     if v_acc.withdrawn then raise exception '탈퇴한 계정은 넣을 수 없어요.'; end if;
+    if v_acc.delete_requested_at is not null then raise exception '삭제 요청 중인 계정은 넣을 수 없어요.'; end if;
     select pc_id, slot into v_where from assignments where account_id = p_account;
     if found then
         raise exception '이 계정은 이미 %에 들어 있어요.', _pc_label(v_where.pc_id, v_where.slot);
@@ -570,7 +635,7 @@ revoke execute on all functions in schema public from public, anon;
 grant execute on function
     public.my_role(), public.is_admin(), public.is_member(), public.has_perm(text),
     public.can_see_account(bigint), public.owns_pc(bigint),
-    public.save_account(jsonb), public.delete_account(bigint),
+    public.save_account(jsonb), public.delete_account(bigint), public.approve_delete(bigint), public.reject_delete(bigint),
     public.save_pc(jsonb), public.delete_pc(bigint),
     public.assign_account(bigint, integer, bigint), public.unassign_slot(bigint, integer),
     public.move_account(bigint, bigint, integer),

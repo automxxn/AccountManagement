@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -37,7 +38,7 @@ class WorkersTab(QWidget):
         self.setObjectName("page")
         self.repo = repo
         self.workers: list[Profile] = []
-        hint = QLabel("① 근무자가 프로그램에서 '처음 사용해요 (가입 요청)'으로 가입하면 여기에 '승인 대기'로 나타나요.\n"
+        hint = QLabel("① 근무자가 로그인 창에서 '가입 요청'을 체크하고 가입하면 여기에 '승인 대기'로 나타나요.\n"
                       "② 역할을 '근무자'로 바꾸고 권한을 체크한 뒤 저장하세요.\n"
                       "③ 컴퓨터/계정 수정 창의 '담당 근무자'에서 맡길 것을 정하세요. 근무자는 담당 컴퓨터와 담당 계정만 볼 수 있어요.")
         hint.setWordWrap(True)
@@ -97,8 +98,13 @@ class WorkersTab(QWidget):
 
     def restyle(self) -> None:
         self.table.verticalHeader().setDefaultSectionSize(px(44))
+        # 열 제목 글자가 잘리지 않게: 기본 너비와 '제목 글자 폭 + 여백' 중 큰 값
+        hf = QFont(self.table.horizontalHeader().font())
+        hf.setPixelSize(px(13))
+        hf.setBold(True)
+        fm = QFontMetrics(hf)
         for c, w in enumerate([180, 160, 140] + [120] * len(PERMS) + [100]):
-            self.table.setColumnWidth(c, px(w))
+            self.table.setColumnWidth(c, max(px(w), fm.horizontalAdvance(COLS[c]) + px(44)))
 
     def _save(self, r: int, p: Profile, role: QComboBox, checks: list[QCheckBox]) -> None:
         q = copy.copy(p)
