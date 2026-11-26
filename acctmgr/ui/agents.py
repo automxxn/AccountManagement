@@ -24,7 +24,7 @@ from .common import (
 )
 from .sheet import SheetNav
 
-COLS = ["", "번호", "컴퓨터", "실행기", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
+COLS = ["", "번호", "컴퓨터", "실행기", "실행기 팀 (코드)", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
 REFRESH_MS = 4000
 
 # 실행기 설정 항목 (키, 이름, 기본값)
@@ -596,6 +596,7 @@ class AgentsTab(QWidget):
         self._suggest: dict[str, int] = {}          # 실행기별 추천 컴퓨터
         self._why: dict[str, str] = {}
         self._pending_key = None
+        self.displaced: dict[str, int] = {}         # 새 실행기로 바꾸면서 밀려난 실행기 → 밀려난 컴퓨터 id
 
         hint = QLabel("각 컴퓨터의 LD CLOUD 실행기에 명령을 보내요. 체크한 컴퓨터에 한 번에 보낼 수 있어요.\n"
                       "A 로그인 = 그 컴퓨터 1자리 계정, B 로그인 = 2자리 계정. 실행기 설정은 오른쪽 [설정]에서만 바꿔요.")
@@ -801,7 +802,10 @@ class AgentsTab(QWidget):
                 st = _item("실행기 없음")
                 st.setForeground(gray)
                 now = _item("")
+                team = _item("-")
+                team.setForeground(gray)
             else:
+                team = self._team_cell(ag, red)
                 live = (ag.state or {}).get("realtime")
                 speed = "" if not ag.online or live is None else ("  · 즉시" if live else "  · 20초마다")
                 st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed + f"\n{ag.machine}")
@@ -815,8 +819,9 @@ class AgentsTab(QWidget):
                 now = _item((("▶ " + s.get("job", "")) if s.get("busy") else s.get("last", "")) or "")
                 now.setToolTip(s.get("last", ""))
             t.setItem(r, 3, st)
-            t.setItem(r, 4, now)
-            for c, slot in ((5, 1), (6, 2)):
+            t.setItem(r, 4, team)
+            t.setItem(r, 5, now)
+            for c, slot in ((6, 1), (7, 2)):
                 aid = pc.slots[slot - 1] if len(pc.slots) >= slot else None
                 t.setItem(r, c, _item(self.acc_names.get(aid, "") if aid else "-"))
             last = (self.commands.get(pc.id) or [None])[0]
@@ -829,9 +834,9 @@ class AgentsTab(QWidget):
                 res.setToolTip(last.get("result", ""))
             else:
                 kind, res = _item(""), _item("")
-            t.setItem(r, 7, kind)
-            t.setItem(r, 8, res)
-            t.setCellWidget(r, 9, self._settings_btn(pc))
+            t.setItem(r, 8, kind)
+            t.setItem(r, 9, res)
+            t.setCellWidget(r, 10, self._settings_btn(pc))
             if pc.id == sel:
                 t.selectRow(r)
         t.blockSignals(False)
@@ -839,6 +844,25 @@ class AgentsTab(QWidget):
         self._render_pending()
         self._render_history()
         self.restyle()
+
+    def _team_cell(self, ag: Agent, red: QColor) -> QTableWidgetItem:
+        """연결된 실행기가 어느 팀으로 등록돼 있는지 + 그 팀의 지금 실행 코드."""
+        teams = {t.id: t for t in self.repo.teams}
+        mine = getattr(self.repo, "team_id", None)
+        tm = teams.get(ag.team_id)
+        name = tm.name if tm else ("팀 없음" if ag.team_id is None else "다른 팀")
+        code = (tm.join_code or "") if tm else ""
+        cell = _item(name + (f"\n코드 {code}" if code else ""))
+        tip = ("이 실행기는 '" + name + "' 팀으로 등록돼 있어요." + (f" 이 팀의 지금 실행 코드: {code}" if code else "")
+               + "\n실행 코드는 실행기를 팀에 처음 넣을 때만 써요. 이미 연결된 실행기는 컴퓨터의 팀을 그대로 따라가서 "
+                 "코드를 다시 넣을 필요가 없어요. (팀 관리에서 새 코드를 만들어도 이미 연결된 실행기는 그대로예요)")
+        if ag.team_id != mine:
+            cur = teams.get(mine).name if teams.get(mine) else "이 팀"
+            cell = _item(f"⚠ {name}\n컴퓨터는 {cur}")
+            cell.setForeground(red)
+            tip = (f"실행기 팀({name})과 컴퓨터 팀({cur})이 달라요. 연결 대기에서 다시 연결하면 컴퓨터 팀으로 맞춰져요.")
+        cell.setToolTip(tip)
+        return cell
 
     def _settings_btn(self, pc) -> QWidget:
         w = QWidget()
@@ -850,7 +874,7 @@ class AgentsTab(QWidget):
     def restyle(self) -> None:
         self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 40))
         # 글자가 잘리지 않게 내용에 맞추되, 긴 글(지금 상태, 계정, 결과)은 너무 넓어지지 않게 (전체는 툴팁)
-        fit_columns(self.table, mins={0: 36, 3: 150}, caps={4: 260, 5: 230, 6: 230, 7: 200, 8: 320})
+        fit_columns(self.table, mins={0: 36, 3: 150}, caps={4: 200, 5: 260, 6: 230, 7: 230, 8: 200, 9: 320})
         self.hist.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "hist_nav", None), 30))
         fit_columns(self.hist, mins={0: 120}, caps={5: 420})
         self.pend.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "pend_nav", None), 40))
@@ -1024,8 +1048,23 @@ class AgentsTab(QWidget):
             i = self.bulk_team.findData(cur if cur is not None else self.repo.team_id)
             self.bulk_team.setCurrentIndex(max(i, 0))
         self.pend.setRowCount(len(self.pending))
+        same_pc = {a.machine: p for p, a in self.agents.items()}
+        pc_label = {p.id: f"{p.no}. {p.name}" for p in self.pcs}
         for r, ag in enumerate(self.pending):
-            self.pend.setItem(r, 0, _item(ag.machine))
+            mc = _item(ag.machine)
+            gone = self.displaced.get(ag.user_id)
+            if gone is not None:
+                mc = _item(f"{ag.machine}\n({pc_label.get(gone, '?')}에서 풀림)")
+                mc.setForeground(QColor("#D97706"))
+                mc.setToolTip("방금 다른 실행기로 바꾸면서 연결이 풀린 실행기예요. 이 실행기가 원래 있어야 할 컴퓨터를 고르세요.\n"
+                              "'그 PC가 여는 클라우드'는 풀리기 전 컴퓨터 설정에서 받은 값이라 맞지 않을 수 있어요.")
+            elif ag.machine in same_pc:
+                mc = _item(f"{ag.machine}\n(같은 이름이 {pc_label.get(same_pc[ag.machine], '?')}에 연결됨)")
+                mc.setForeground(QColor("#D97706"))
+                mc.setToolTip("같은 Windows PC 이름의 실행기가 이미 다른 컴퓨터 자리에 연결돼 있어요.\n"
+                              "같은 PC에서 실행기를 두 번(다른 폴더에서) 켰거나 다시 설치했을 수 있어요. "
+                              "쓰지 않는 쪽은 [지우기]로 지우세요.")
+            self.pend.setItem(r, 0, mc)
             self.pend.setItem(r, 1, _item(ag.version))
             opens = _agent_cloud(ag)
             oc = _item(opens or "(정해지지 않음)")
@@ -1109,7 +1148,9 @@ class AgentsTab(QWidget):
             cloud_id((p.agent_settings or {}).get("cloud")) == cloud_id((a.state.get("cfg") or {}).get("cloud"))
             for p in self.pcs) else 1)
         for ag in order:
-            pc, why = suggest_pc((ag.state.get("cfg") or {}).get("cloud") or "", self.pcs, taken, used)
+            gone = self.displaced.get(ag.user_id)
+            pc, why = suggest_pc((ag.state.get("cfg") or {}).get("cloud") or "", self.pcs, taken,
+                                 used | ({gone} if gone is not None else set()))
             if pc is not None:
                 used.add(pc.id)
                 self._suggest[ag.user_id] = pc.id
@@ -1136,15 +1177,27 @@ class AgentsTab(QWidget):
         if pid in self.agents and QMessageBox.question(
                 self, "연결", "이 컴퓨터에는 이미 실행기가 있어요. 새 실행기로 바꿀까요?") != QMessageBox.Yes:
             return
+        old = self.agents.get(pid)
         if run_safely(self, self.repo.link_agent, ag.user_id, pid):
             self.pending_choice.pop(ag.user_id, None)
+            self.displaced.pop(ag.user_id, None)
+            if old is not None and old.user_id != ag.user_id:
+                # 원래 붙어 있던 실행기는 연결이 풀려 연결 대기로 온다. 그 실행기는 이 컴퓨터 설정(클라우드)을 받아 두었으니
+                # 같은 컴퓨터를 또 추천하면 서로 자리만 바꾸게 되므로, 그 컴퓨터는 추천에서 뺀다
+                self.displaced[old.user_id] = pid
+                self.pending_choice.pop(old.user_id, None)
             try:
                 self.repo.sync_pc_creds()
             except RepoError:
                 pass
             self._redraw_pending()
             pc = next((p for p in self.pcs if p.id == pid), None)
-            self._say(f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요.")
+            msg = f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요."
+            if old is not None and old.user_id != ag.user_id:
+                msg += (f"\n\n원래 이 컴퓨터에 있던 실행기({old.machine})는 연결이 풀려서 연결 대기 목록으로 옮겼어요. "
+                        "그 실행기가 원래 있어야 할 컴퓨터를 골라 연결하세요. (주황색으로 표시돼요)")
+                QMessageBox.information(self, "연결", msg)
+            self._say(msg.split("\n")[0])
 
     def _pend_check_all(self, on: bool) -> None:
         self.pend_checked = {a.user_id for a in self.pending} if on else set()
