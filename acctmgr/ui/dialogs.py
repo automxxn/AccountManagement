@@ -408,7 +408,7 @@ class PcDialog(QDialog):
         self.pc = copy.deepcopy(pc) if pc else PC(no=next_no)
         self.deleted = False
         p = self.pc
-        self.can_save = repo.me.is_admin if pc is None else repo.me.can("can_edit_pc")
+        self.can_save = repo.me.can("can_add_pc") if pc is None else repo.me.can("can_edit_pc")
         self.setWindowTitle(("컴퓨터 수정" if self.can_save else "컴퓨터 정보") if pc else "컴퓨터 추가")
         self.resize(px(460), px(460))
 
@@ -455,7 +455,7 @@ class PcDialog(QDialog):
             lay.addWidget(muted("수정 권한이 없어서 보기만 할 수 있어요."))
         lay.addLayout(form)
         bottom = QHBoxLayout()
-        if pc and repo.me.is_admin:
+        if pc and repo.me.can("can_delete_pc"):
             dele = QPushButton("컴퓨터 삭제")
             dele.clicked.connect(self._delete)
             bottom.addWidget(dele)

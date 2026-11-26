@@ -466,8 +466,91 @@ def app_icon():
     return QIcon(pm)
 
 
+def apply_native_icon(widget, exe_path: str | None = None) -> bool:
+    """작업표시줄/제목줄 아이콘을 exe 안에 든 아이콘으로 직접 정한다 (Windows가 원하는 크기로).
+    exe로 실행할 때만 (개발용 실행은 python.exe 아이콘이라 건너뜀). 성공하면 True."""
+    import sys
+    if sys.platform != "win32":
+        return False
+    path = exe_path or (sys.executable if getattr(sys, "frozen", False) else None)
+    if not path:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.PrivateExtractIconsW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                                ctypes.POINTER(wintypes.HICON), ctypes.POINTER(wintypes.UINT),
+                                                wintypes.UINT, wintypes.UINT]
+        user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.SendMessageW.restype = wintypes.LPARAM
+        hwnd = int(widget.winId())
+        ok = False
+        # ICON_BIG(1) = 작업표시줄/Alt+Tab, ICON_SMALL(0) = 제목줄. 크기는 지금 화면 배율 기준 시스템 값
+        for which, metric in ((1, 11), (0, 49)):   # SM_CXICON, SM_CXSMICON
+            size = user32.GetSystemMetricsForDpi(metric, user32.GetDpiForWindow(hwnd)) \
+                if hasattr(user32, "GetDpiForWindow") else user32.GetSystemMetrics(metric)
+            hicon = wintypes.HICON()
+            if user32.PrivateExtractIconsW(path, 0, size, size, ctypes.byref(hicon), None, 1, 0) == 1 and hicon:
+                user32.SendMessageW(hwnd, 0x0080, which, ctypes.cast(hicon, ctypes.c_void_p).value)  # WM_SETICON
+                ok = True
+        return ok
+    except Exception:
+        return False
+
+
+def refresh_shell_icons_once(version: str) -> None:
+    """새 버전으로 처음 켰을 때 한 번만 Windows 아이콘 캐시를 새로 고친다
+    (아이콘이 없던 예전 버전 exe의 빈 아이콘이 작업표시줄에 남아 있는 경우)."""
+    import sys
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+    try:
+        from .connect import settings
+        s = settings()
+        if s.value("icon_refreshed_for", "") == version:
+            return
+        import ctypes
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)   # SHCNE_ASSOCCHANGED
+        s.setValue("icon_refreshed_for", version)
+    except Exception:
+        pass
+
+
 def copy_text(text: str) -> None:
     QApplication.clipboard().setText(text)
+
+
+def fit_columns(table, mins: dict | None = None, caps: dict | None = None) -> None:
+    """열 너비를 제목과 내용이 잘리지 않게 맞춘다.
+
+    제목(굵은 글씨 + 좌우 여백)과 각 칸의 글자(여러 줄이면 가장 긴 줄)·칸 안 위젯의 크기 중 가장 큰 값.
+    mins/caps = {열 번호: 최소/최대 px(배율 전)} — 아주 긴 글(결과, 로그 등)은 caps로 막고 툴팁으로 보이게 한다.
+    """
+    from PySide6.QtGui import QFont, QFontMetrics
+    hdr = table.horizontalHeader()
+    hf = QFont(table.font())
+    hf.setBold(True)
+    hfm = QFontMetrics(hf)
+    cfm = QFontMetrics(table.font())
+    for c in range(table.columnCount()):
+        if table.isColumnHidden(c):
+            continue
+        head = table.horizontalHeaderItem(c)
+        w = max(hfm.horizontalAdvance(line) for line in (head.text() if head else "").split("\n")) + px(34)
+        for r in range(table.rowCount()):
+            it = table.item(r, c)
+            if it is not None and it.text():
+                w = max(w, max(cfm.horizontalAdvance(line) for line in it.text().split("\n")) + px(40))
+            cw = table.cellWidget(r, c)
+            if cw is not None:
+                w = max(w, cw.sizeHint().width() + px(6))
+        if mins and c in mins:
+            w = max(w, px(mins[c]))
+        if caps and c in caps:
+            w = min(w, px(caps[c]))
+        table.setColumnWidth(c, w)
+    hdr.setMinimumSectionSize(px(36))
 
 
 class _WheelGuard(QObject):

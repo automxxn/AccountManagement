@@ -378,6 +378,8 @@ class CloudRepository:
                        can_view_accounts=r.get("can_view_accounts", True),
                        can_assign_team=r.get("can_assign_team", False),
                        can_control_pc=r.get("can_control_pc", False),
+                       can_add_pc=r.get("can_add_pc", False),
+                       can_delete_pc=r.get("can_delete_pc", False),
                        teams=sorted(m["team_id"] for m in (r.get("team_members") or [])))
 
     def _account_payload(self, a: Account, encrypt: bool = True) -> dict:
@@ -517,6 +519,7 @@ class CloudRepository:
             "can_delete_account": p.can_delete_account, "can_edit_pc": p.can_edit_pc,
             "can_view_workplace": p.can_view_workplace, "can_view_accounts": p.can_view_accounts,
             "can_assign_team": p.can_assign_team, "can_control_pc": p.can_control_pc,
+            "can_add_pc": p.can_add_pc, "can_delete_pc": p.can_delete_pc,
             "teams": list(p.teams)}})
 
     def bulk_import(self, accounts: list[Account], pcs: list[PC], links: list[tuple[int, int, int]]) -> int:

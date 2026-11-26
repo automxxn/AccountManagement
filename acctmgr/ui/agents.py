@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..db import RepoError
 from ..models import AGENT_KINDS, COMMAND_STATUS, Agent
-from .common import T, button, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
+from .common import T, button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
 
 COLS = ["", "번호", "컴퓨터", "실행기", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
 REFRESH_MS = 4000
@@ -452,8 +452,7 @@ class CloudAssignDialog(QDialog):
             bl.setContentsMargins(4, 2, 4, 2)
             bl.addWidget(c)
             self.table.setCellWidget(r, 3, box)
-        for col, w in enumerate([50, 130, 190, 290]):
-            self.table.setColumnWidth(col, px(w))
+        fit_columns(self.table, mins={3: 290}, caps={2: 260})
         btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Save).setText("저장")
         btns.button(QDialogButtonBox.Cancel).setText("취소")
@@ -731,15 +730,13 @@ class AgentsTab(QWidget):
         return w
 
     def restyle(self) -> None:
-        self.table.verticalHeader().setDefaultSectionSize(px(38))
-        for c, w in enumerate([36, 50, 110, 160, 180, 150, 150, 140, 190, 70]):
-            self.table.setColumnWidth(c, px(w))
+        self.table.verticalHeader().setDefaultSectionSize(px(40))
+        # 글자가 잘리지 않게 내용에 맞추되, 긴 글(지금 상태, 계정, 결과)은 너무 넓어지지 않게 (전체는 툴팁)
+        fit_columns(self.table, mins={0: 36, 3: 150}, caps={4: 260, 5: 230, 6: 230, 7: 200, 8: 320})
         self.hist.verticalHeader().setDefaultSectionSize(px(30))
-        for c, w in enumerate([120, 90, 90, 80, 150]):
-            self.hist.setColumnWidth(c, px(w))
+        fit_columns(self.hist, mins={0: 120}, caps={5: 420})
         self.pend.verticalHeader().setDefaultSectionSize(px(40))
-        for c, w in enumerate([150, 90, 220, 110, 300]):
-            self.pend.setColumnWidth(c, px(w))
+        fit_columns(self.pend, mins={4: 300}, caps={2: 280})
 
     def _toggle(self, pc_id: int, on: bool) -> None:
         (self.checked.add if on else self.checked.discard)(pc_id)

@@ -27,6 +27,9 @@ alter table public.profiles add column if not exists can_view_accounts boolean n
 alter table public.profiles add column if not exists can_assign_team boolean not null default false;
 -- PC 조종: LD CLOUD 실행기에 명령(시작/재시작/로그인 등)을 보내고 실행기 설정을 바꿀 수 있는지
 alter table public.profiles add column if not exists can_control_pc boolean not null default false;
+-- 컴퓨터 추가 / 삭제 (근무자에게 켜 줄 수 있음. 관리자는 맡은 팀에서 항상 가능)
+alter table public.profiles add column if not exists can_add_pc boolean not null default false;
+alter table public.profiles add column if not exists can_delete_pc boolean not null default false;
 
 -- 팀: 이름, 게임 종류, 팀 열쇠 확인값(열쇠가 맞는지 확인하는 암호문)
 create table if not exists public.teams (
@@ -272,6 +275,8 @@ language sql stable security definer set search_path = public as $$
             when perm_name = 'view_workplace' then pr.can_view_workplace
             when perm_name = 'view_accounts' then pr.can_view_accounts
             when perm_name = 'control_pc' then pr.can_control_pc
+            when perm_name = 'add_pc' then pr.role = 'admin' or pr.can_add_pc
+            when perm_name = 'delete_pc' then pr.role = 'admin' or pr.can_delete_pc
             else false end
         from profiles pr where pr.id = auth.uid()), false)
 $$;
@@ -576,7 +581,9 @@ declare
 begin
     if v_slots < 1 then raise exception '자리 수는 1 이상이어야 해요.'; end if;
     if v_id is null then
-        if v_team is null or not is_team_admin(v_team) then raise exception '컴퓨터 추가는 관리자만 할 수 있어요.'; end if;
+        if v_team is null or not (is_team_admin(v_team) or (in_team(v_team) and has_perm('add_pc'))) then
+            raise exception '컴퓨터 추가 권한이 없어요.';
+        end if;
     else
         select * into v_cur from pcs where id = v_id for update;
         if not found then raise exception '없는 컴퓨터예요. 새로고침한 뒤 다시 시도하세요.'; end if;
@@ -624,7 +631,9 @@ declare
 begin
     select format('%s. %s', no, name), team_id into v_label, v_team from pcs where id = p_id;
     if not found then raise exception '없는 컴퓨터예요. 새로고침하세요.'; end if;
-    if not is_team_admin(v_team) then raise exception '컴퓨터 삭제는 관리자만 할 수 있어요.'; end if;
+    if not (is_team_admin(v_team) or (in_team(v_team) and has_perm('delete_pc'))) then
+        raise exception '컴퓨터 삭제 권한이 없어요.';
+    end if;
     delete from pcs where id = p_id;
     perform _log('컴퓨터 삭제', coalesce(v_label, '') || ' (들어 있던 계정은 사용가능으로 돌아감)', v_team);
 end $$;
@@ -827,6 +836,10 @@ begin
             then coalesce((p ->> 'can_view_accounts')::boolean, true) else v_cur.can_view_accounts end,
         can_control_pc = case when v_super or has_perm('control_pc')
             then coalesce((p ->> 'can_control_pc')::boolean, false) else v_cur.can_control_pc end,
+        can_add_pc = case when v_super or has_perm('add_pc')
+            then coalesce((p ->> 'can_add_pc')::boolean, false) else v_cur.can_add_pc end,
+        can_delete_pc = case when v_super or has_perm('delete_pc')
+            then coalesce((p ->> 'can_delete_pc')::boolean, false) else v_cur.can_delete_pc end,
         can_assign_team = case when v_super
             then v_role = 'admin' and coalesce((p ->> 'can_assign_team')::boolean, false) else v_cur.can_assign_team end
     where id = v_id;

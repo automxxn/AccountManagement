@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .common import button, page_header, px, run_safely, style_table
+from .common import button, fit_columns, page_header, px, run_safely, style_table
 
 COLS = ["팀 이름", "관리자", "근무자", "컴퓨터", "계정", ""]
 
@@ -85,8 +85,7 @@ class TeamsTab(QWidget):
 
     def restyle(self) -> None:
         self.table.verticalHeader().setDefaultSectionSize(px(44))
-        for c, w in enumerate([200, 220, 90, 90, 90]):
-            self.table.setColumnWidth(c, px(w))
+        fit_columns(self.table, mins={0: 160, 1: 160}, caps={1: 420})
 
     def _add(self) -> None:
         name, ok = QInputDialog.getText(self, "팀 추가", "새 팀 이름")

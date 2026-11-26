@@ -17,11 +17,14 @@ from PySide6.QtWidgets import (
 
 from ..cloud import LOGIN_DOMAIN
 from ..db import RepoError
-from ..models import PERMS, ROLES, Profile
-from .common import button, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
+from ..models import ADMIN_ALWAYS, PERMS, ROLES, Profile
+from .common import button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
 
 ASSIGN_COL_LABEL = "팀 배정"
-COLS = ["이름", "아이디", "역할", "팀"] + [label for _, label in PERMS] + [ASSIGN_COL_LABEL, ""]
+# 권한 칸 제목은 두 줄로 (열이 많아도 한 화면에 들어오게): '계정 정보 수정' → '계정\n정보 수정'
+COLS = ["이름", "아이디", "역할", "팀"] + [label.replace(" ", "\n", 1) for _, label in PERMS] \
+    + [ASSIGN_COL_LABEL.replace(" ", "\n", 1), ""]
+ASSIGN_COL = len(COLS) - 2
 FIRST_PERM_COL = 4
 
 
@@ -120,7 +123,7 @@ class WorkersTab(QWidget):
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setColumnHidden(COLS.index(ASSIGN_COL_LABEL), not me.is_super)
+        self.table.setColumnHidden(ASSIGN_COL, not me.is_super)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(14)
@@ -207,7 +210,7 @@ class WorkersTab(QWidget):
             assign.setChecked(p.role == "super" or p.can_assign_team)
             assign.setToolTip("관리자가 가입 승인과 팀 배정을 할 수 있게 해요 (맡은 팀으로만)")
             row.assign = assign
-            self.table.setCellWidget(r, COLS.index(ASSIGN_COL_LABEL), _centered(assign))
+            self.table.setCellWidget(r, ASSIGN_COL, _centered(assign))
 
             role.currentIndexChanged.connect(lambda _=0, row=row: self._enable(row))
             self._enable(row)
@@ -227,7 +230,11 @@ class WorkersTab(QWidget):
         editable = self._can_edit(row.p)
         role = row.role.currentData()
         for cb in row.checks:
-            cb.setEnabled(editable and role in ("admin", "worker") and me.can(cb.perm))
+            always = role == "admin" and cb.perm in ADMIN_ALWAYS
+            if always:
+                cb.setChecked(True)
+                cb.setToolTip("관리자는 맡은 팀에서 항상 할 수 있어요")
+            cb.setEnabled(editable and not always and role in ("admin", "worker") and me.can(cb.perm))
         row.assign.setEnabled(editable and me.is_super and role == "admin")
 
     def _pick_teams(self, row: _Row) -> None:
@@ -239,13 +246,8 @@ class WorkersTab(QWidget):
 
     def restyle(self) -> None:
         self.table.verticalHeader().setDefaultSectionSize(px(44))
-        # 열 제목 글자가 잘리지 않게: 기본 너비와 '제목 글자 폭 + 여백' 중 큰 값
-        hf = QFont(self.table.horizontalHeader().font())
-        hf.setPixelSize(px(13))
-        hf.setBold(True)
-        fm = QFontMetrics(hf)
-        for c, w in enumerate([110, 100, 120, 130] + [72] * len(PERMS) + [72, 80]):
-            self.table.setColumnWidth(c, max(px(w), fm.horizontalAdvance(COLS[c]) + px(24)))
+        # 열 제목과 내용이 잘리지 않게 (권한 칸은 제목 글자 폭에 맞춤)
+        fit_columns(self.table, mins={0: 90, 1: 90, 2: 120, 3: 120, len(COLS) - 1: 80})
 
     def _save(self, r: int, row: _Row) -> None:
         p = row.p

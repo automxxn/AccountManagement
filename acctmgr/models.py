@@ -247,9 +247,14 @@ PERMS = (
     ("can_add_account", "계정 추가"),
     ("can_edit_account", "계정 정보 수정"),
     ("can_delete_account", "계정 삭제"),
-    ("can_edit_pc", "컴퓨터 정보 수정"),
+    ("can_add_pc", "컴퓨터 추가"),
+    ("can_edit_pc", "컴퓨터 수정"),
+    ("can_delete_pc", "컴퓨터 삭제"),
     ("can_control_pc", "PC 조종"),
 )
+# 관리자는 맡은 팀에서 항상 할 수 있는 것 (근무자에게만 켜고 끔)
+ADMIN_ALWAYS = ("can_add_pc", "can_delete_pc")
+
 ROLES = {"super": "총관리자", "admin": "관리자", "worker": "근무자", "pending": "승인 대기"}
 
 
@@ -276,6 +281,8 @@ class Profile:
     can_view_accounts: bool = True
     can_assign_team: bool = False   # 관리자만: 가입 승인과 팀 배정
     can_control_pc: bool = True     # LD CLOUD 실행기에 명령 보내기 (로컬은 혼자라 켬)
+    can_add_pc: bool = True         # 컴퓨터 추가 (관리자는 항상)
+    can_delete_pc: bool = True      # 컴퓨터 삭제 (관리자는 항상)
     teams: list[int] = field(default_factory=list)  # 속한 팀 (근무자 1개, 관리자 여러 개)
 
     @property
@@ -289,6 +296,8 @@ class Profile:
 
     def can(self, perm: str) -> bool:
         if self.is_super:
+            return True
+        if self.role == "admin" and perm in ADMIN_ALWAYS:
             return True
         return self.role in ("admin", "worker") and bool(getattr(self, perm, False))
 

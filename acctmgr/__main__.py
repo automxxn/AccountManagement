@@ -1,11 +1,12 @@
 import sys
 
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QApplication
 
 from . import logsetup
 from .db import Repository
 from .version import __version__
-from .ui.common import app_icon, apply_appearance
+from .ui.common import app_icon, apply_appearance, apply_native_icon, refresh_shell_icons_once
 from .ui.connect import settings, start_repository
 from .ui.main_window import MainWindow
 from .ui.update_ui import startup_check
@@ -20,6 +21,23 @@ def _set_app_id() -> None:
         pass
 
 
+class _NativeIcons(QObject):
+    """창(로그인 창, 메인 창, 대화상자)이 처음 뜰 때 exe에 든 아이콘을 Windows에 직접 붙인다.
+    (Qt 아이콘만으로는 일부 PC의 작업표시줄에 기본 아이콘이 보이는 경우가 있었음)"""
+
+    def __init__(self):
+        super().__init__()
+        self.done = set()
+
+    def eventFilter(self, obj, ev) -> bool:
+        if ev.type() == QEvent.Show and getattr(obj, "isWindow", None) and obj.isWindow():
+            key = id(obj)
+            if key not in self.done:
+                self.done.add(key)
+                apply_native_icon(obj)
+        return False
+
+
 def main() -> None:
     logsetup.setup()
     _set_app_id()
@@ -27,6 +45,9 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("AccountManagement")
     app.setWindowIcon(app_icon())
+    icons = _NativeIcons()
+    app.installEventFilter(icons)
+    refresh_shell_icons_once(__version__)
     app.setStyle("Fusion")
     s = settings()
     apply_appearance(s.value("theme", "light"), float(s.value("zoom", 1.0)))

@@ -176,7 +176,7 @@ class WorkplaceTab(QWidget):
         self.pw_btn.toggled.connect(lambda on: (self.pw_btn.setText("비번 가리기" if on else "비번 보기"),
                                                 self._render_cards()))
         bar.addWidget(self.pw_btn)
-        if repo.me.is_admin:
+        if repo.me.can("can_add_pc"):
             bar.addWidget(button("+ 컴퓨터 추가", "primary", lambda: self.edit_pc(None)))
         left.addLayout(bar)
 
