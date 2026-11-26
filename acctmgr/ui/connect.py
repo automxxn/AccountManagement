@@ -420,6 +420,9 @@ def start_repository():
             return Repository()
         repo = CloudRepository(*target)
         repo.on_session = lambda token, url=repo.url: save_auto_login(url, token)
+        if try_auto and s.value("skip_auto_once", False, type=bool):
+            s.setValue("skip_auto_once", False)
+            try_auto = False
         token = stored_token(repo.url) if try_auto else None
         try_auto = False
         logged_in = False

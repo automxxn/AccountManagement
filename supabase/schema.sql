@@ -863,7 +863,7 @@ begin
     if not is_super() then raise exception '팀은 총관리자만 만들 수 있어요.'; end if;
     if trim(coalesce(p_name, '')) = '' then raise exception '팀 이름을 입력하세요.'; end if;
     if exists (select 1 from teams where name = trim(p_name)) then raise exception '같은 이름의 팀이 이미 있어요.'; end if;
-    insert into teams (name, key_check) values (trim(p_name), p_check) returning id into v_id;
+    insert into teams (name, key_check, join_code) values (trim(p_name), p_check, _new_join_code()) returning id into v_id;
     insert into team_master (team_id, box) values (v_id, p_box);
     perform _log('팀 추가', trim(p_name));
     return v_id;
@@ -1058,6 +1058,28 @@ create table if not exists public.agents (
     created_at  timestamptz not null default now()
 );
 
+-- 팀 실행 코드: 각 PC 실행기를 처음 켤 때 입력하면 그 팀 실행기가 된다 (팀 관리에서 보고 새로 만들 수 있음)
+alter table public.teams add column if not exists join_code text;
+create unique index if not exists teams_join_code_idx on public.teams(join_code);
+
+create or replace function public._new_join_code() returns text
+language plpgsql volatile as $$
+declare
+    chars text := 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';   -- 헷갈리는 0/O, 1/I 빼고
+    c     text;
+begin
+    loop
+        c := '';
+        for i in 1..6 loop
+            c := c || substr(chars, 1 + floor(random() * length(chars))::int, 1);
+        end loop;
+        exit when not exists (select 1 from public.teams where join_code = c);
+    end loop;
+    return c;
+end $$;
+
+update public.teams set join_code = public._new_join_code() where coalesce(join_code, '') = '';
+
 -- 실행기가 속한 팀 (연결 대기 실행기를 그 팀 관리자에게만 보이게). 연결하면 그 컴퓨터의 팀
 alter table public.agents add column if not exists team_id bigint references public.teams(id) on delete set null;
 
@@ -1227,7 +1249,9 @@ begin
                          _pc_team(v_cands[1]));
         end if;
     end if;
-    if v_ag.pc_id is null then return jsonb_build_object('pc_id', null); end if;
+    if v_ag.pc_id is null then
+        return jsonb_build_object('pc_id', null, 'team_id', v_ag.team_id, 'team_name', _team_name(v_ag.team_id));
+    end if;
     -- 작업장 LD클라우드 칸 = 이 실행기가 실제로 여는 클라우드 (바뀌면 기록을 남겨 다른 화면도 새로고침되게)
     if _cloud_name(v_cloud) <> '' then
         update pcs set ld_cloud = _cloud_name(v_cloud), updated_at = now()
@@ -1327,6 +1351,39 @@ begin
         raise exception '관리자만 할 수 있어요.';
     end if;
     delete from agents where user_id = p_agent;
+end $$;
+
+-- 총관리자: 팀 실행 코드 새로 만들기 (예전 코드는 더 이상 안 됨)
+create or replace function public.new_join_code(p_team bigint) returns text
+language plpgsql security definer set search_path = public as $$
+declare v text;
+begin
+    if not is_super() then raise exception '총관리자만 할 수 있어요.'; end if;
+    v := _new_join_code();
+    update teams set join_code = v where id = p_team;
+    if not found then raise exception '없는 팀이에요.'; end if;
+    perform _log('팀 실행 코드 새로 만듦', _team_name(p_team), p_team);
+    return v;
+end $$;
+
+-- 실행기: 팀 실행 코드 입력 → 그 팀 실행기가 된다. 팀 이름을 돌려준다
+create or replace function public.agent_join_team(p_code text) returns text
+language plpgsql security definer set search_path = public as $$
+declare
+    v_team teams%rowtype;
+    v_ag   agents%rowtype;
+begin
+    if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
+    select * into v_team from teams where join_code = upper(trim(coalesce(p_code, '')));
+    if not found then raise exception '코드가 맞지 않아요. 관리자에게 다시 확인하세요.'; end if;
+    select * into v_ag from agents where user_id = auth.uid();
+    if not found then raise exception '먼저 등록해야 해요.'; end if;
+    if v_ag.pc_id is not null and _pc_team(v_ag.pc_id) <> v_team.id then
+        raise exception '이미 다른 팀 컴퓨터에 연결돼 있어요. 관리자가 연결을 끊은 뒤 다시 입력하세요.';
+    end if;
+    update agents set team_id = v_team.id where user_id = auth.uid();
+    perform _log('실행기 팀 코드', v_ag.machine || ' → ' || v_team.name, v_team.id);
+    return v_team.name;
 end $$;
 
 -- 총관리자: 연결 대기 실행기의 팀 정하기 (자동으로 못 정한 경우)
@@ -1452,5 +1509,6 @@ grant execute on function
     public.agent_register(text, text, text), public.agent_sync(jsonb, jsonb), public.agent_report(bigint, text, text, text),
     public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text, text),
     public.set_agent_team(uuid, bigint), public._agent_cloud_ids(jsonb, text),
+    public.new_join_code(bigint), public.agent_join_team(text),
     public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds()
 to authenticated;

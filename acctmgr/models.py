@@ -264,6 +264,7 @@ class Team:
     name: str
     games: list[str] = field(default_factory=list)
     key_check: str = ""
+    join_code: str = ""   # 팀 실행 코드 (PC 실행기를 처음 켤 때 입력)
 
 
 @dataclass

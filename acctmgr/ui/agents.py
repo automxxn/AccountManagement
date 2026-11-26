@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QMenu,
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
     QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
@@ -19,7 +19,10 @@ from PySide6.QtWidgets import (
 
 from ..db import RepoError
 from ..models import AGENT_KINDS, COMMAND_STATUS, GAMES, Agent
-from .common import T, button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
+from .common import (
+    T, button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused, zoom_rows,
+)
+from .sheet import SheetNav
 
 COLS = ["", "번호", "컴퓨터", "실행기", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
 REFRESH_MS = 4000
@@ -245,7 +248,8 @@ class AgentSettingsDialog(QDialog):
             found = [x for x in (cur.get("amp_found") or []) if x]
             chosen = dict(cur.get("amp_paths") or {})
             frow = QHBoxLayout()
-            frow.addWidget(muted(f"그 PC에서 찾은 AMP {len(found)}개" if found else "아직 안 찾음 → [AMP 모두 찾기]"), 1)
+            self.amp_found_label = muted(f"그 PC에서 찾은 AMP {len(found)}개" if found else "아직 안 찾음 → [AMP 모두 찾기]")
+            frow.addWidget(self.amp_found_label, 1)
             frow.addWidget(self._cmd_btn("AMP 모두 찾기", "amp_find", "그 PC에서 AMP.exe를 모두 찾아요 (1~2분). 끝나면 이 창을 다시 여세요"))
             form.addRow("게임별 AMP", frow)
             self.amp_games = {}
@@ -332,9 +336,47 @@ class AgentSettingsDialog(QDialog):
     def _send(self, kind: str, arg: str = "") -> None:
         if self.agent is None:
             return
+        if kind == "amp_find":
+            self._amp_cid = None
         if run_safely(self, self.repo.send_command, self.pc.id, kind, arg):
+            if kind == "amp_find":
+                self._watch_amp_find()
             self.cmd_msg.setText(f"[{kind_label(kind, arg)}] 명령을 보냈어요. 결과는 PC 조종 화면의 명령 기록에 나와요 "
                                  "(위치 값은 몇 초 뒤 이 창을 다시 열면 바뀌어요).")
+
+    def _watch_amp_find(self) -> None:
+        """AMP 모두 찾기를 보낸 뒤: 실행기가 찾기를 마치면 게임별 AMP 목록을 저절로 채운다 (창을 다시 안 열어도)."""
+        self._amp_tries = 0
+        self._amp_timer = QTimer(self)
+        self._amp_timer.timeout.connect(self._poll_amp_found)
+        self._amp_timer.start(3000)
+        self.cmd_msg.setText("그 PC에서 AMP를 찾는 중이에요 (1~2분). 끝나면 아래 목록이 저절로 채워져요.")
+
+    def _poll_amp_found(self) -> None:
+        self._amp_tries += 1
+        try:
+            cmds = self.repo.list_commands([self.pc.id], limit=5)
+            last = next((c for c in cmds if c["kind"] == "amp_find"), None)
+            if last is None or last["status"] in ("queued", "running"):
+                if self._amp_tries > 80:
+                    self._amp_timer.stop()
+                    self.cmd_msg.setText("아직 끝나지 않았어요. 잠시 뒤 이 창을 다시 열어 보세요.")
+                return
+            self._amp_timer.stop()
+            ag = next((a for a in self.repo.list_agents() if a.user_id == self.agent.user_id), None)
+            found = [x for x in (((ag.state.get("cfg") or {}).get("amp_found")) if ag else []) or [] if x]
+            for g, c in getattr(self, "amp_games", {}).items():
+                cur = c.currentData()
+                c.clear()
+                c.addItem("(정하지 않음)", "")
+                for x in found:
+                    c.addItem(x, x)
+                i = c.findData(cur)
+                c.setCurrentIndex(i if i >= 0 else 0)
+            self.amp_found_label.setText(f"그 PC에서 찾은 AMP {len(found)}개" if found else "AMP를 찾지 못했어요")
+            self.cmd_msg.setText(last.get("result", "") or "")
+        except RepoError as e:
+            self.cmd_msg.setText(f"확인 중: {e}")
 
     def _before(self) -> list:
         return [self.checks["restart_before_a"], self.checks["restart_before_b"]]
@@ -446,6 +488,7 @@ class CloudAssignDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setDefaultSectionSize(px(40))
+        self.nav = SheetNav(self.table, "zoom_clouds", self._fit)
         self.combos = {}
         self.before = {}
         # 이미 쓰이는 클라우드 (정해 둔 것 + 실행기가 여는 것) → 추천에서 뺌
@@ -489,7 +532,7 @@ class CloudAssignDialog(QDialog):
             bl.setContentsMargins(4, 2, 4, 2)
             bl.addWidget(c)
             self.table.setCellWidget(r, 3, box)
-        fit_columns(self.table, mins={3: 290}, caps={2: 260})
+        self._fit()
         btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Save).setText("저장")
         btns.button(QDialogButtonBox.Cancel).setText("취소")
@@ -499,6 +542,11 @@ class CloudAssignDialog(QDialog):
         lay.addWidget(hint)
         lay.addWidget(self.table, 1)
         lay.addWidget(btns)
+
+    def _fit(self) -> None:
+        if hasattr(self, "combos"):
+            self.table.verticalHeader().setDefaultSectionSize(zoom_rows(self.nav, 40))
+            fit_columns(self.table, mins={3: 290}, caps={2: 260})
 
     def value(self) -> dict:
         return {pid: c.currentData() or "" for pid, c in self.combos.items()}
@@ -601,6 +649,7 @@ class AgentsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.itemSelectionChanged.connect(self._row_selected)
+        self.nav = SheetNav(self.table, "zoom_pc", self.restyle)
 
         # 아래: 고른 컴퓨터의 명령 기록과 진행 로그
         self.hist_title = muted("컴퓨터를 고르면 명령 기록과 진행 로그가 보여요.")
@@ -612,6 +661,7 @@ class AgentsTab(QWidget):
         self.hist.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.hist.horizontalHeader().setStretchLastSection(True)
         self.hist.itemSelectionChanged.connect(self._show_log)
+        self.hist_nav = SheetNav(self.hist, "zoom_pc_hist", self.restyle)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("명령을 고르면 실행기가 보낸 진행 로그가 보여요.")
@@ -630,15 +680,36 @@ class AgentsTab(QWidget):
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
         pl.addWidget(QLabel("<b>연결 대기 실행기</b> — 새로 설치되거나 업데이트된 실행기예요. 어느 컴퓨터인지 골라 [연결]을 누르세요."))
-        self.pend = QTableWidget(0, 7)
+        if repo.me.is_super:
+            tb = QHBoxLayout()
+            self.pend_all = QCheckBox("전체 선택")
+            self.pend_all.toggled.connect(self._pend_check_all)
+            tb.addWidget(self.pend_all)
+            tb.addSpacing(px(12))
+            tb.addWidget(muted("선택한 실행기를 팀으로:"))
+            self.bulk_team = QComboBox()
+            wheel_only_when_focused(self.bulk_team)
+            tb.addWidget(self.bulk_team)
+            tb.addWidget(muted("또는 실행 코드"))
+            self.bulk_code = QLineEdit()
+            self.bulk_code.setPlaceholderText("예: K7M2QX")
+            self.bulk_code.setMaximumWidth(px(110))
+            tb.addWidget(self.bulk_code)
+            tb.addWidget(button("적용", "primary", self._bulk_team, "체크한 실행기들을 고른 팀(또는 코드의 팀)으로 정해요"))
+            tb.addStretch(1)
+            pl.addLayout(tb)
+        self.pend = QTableWidget(0, 8)
         self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "그 PC가 여는 클라우드", "마지막 연락",
-                                             "연결할 컴퓨터 (눌러서 고르기)", "", "팀"])
+                                             "연결할 컴퓨터 (눌러서 고르기)", "", "팀", "선택"])
         self.pend.setColumnHidden(6, not repo.me.is_super)
+        self.pend.setColumnHidden(7, not repo.me.is_super)
+        self.pend_checked: set[str] = set()
         self.pend.verticalHeader().setVisible(False)
         style_table(self.pend)
         self.pend.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.pend.setSelectionMode(QAbstractItemView.NoSelection)
         self.pend.horizontalHeader().setStretchLastSection(True)
+        self.pend_nav = SheetNav(self.pend, "zoom_pc_pend", self.restyle)
         pl.addWidget(self.pend)
 
         split = QSplitter(Qt.Vertical)
@@ -652,6 +723,7 @@ class AgentsTab(QWidget):
         lay.addWidget(page_header("PC 조종", "LD CLOUD 실행기에 명령을 보내고 상태를 봐요",
                                   [button("새로고침", "", self.refresh)]))
         lay.addWidget(hint)
+        lay.addWidget(muted("표 크기: 표 위에서 Ctrl+휠로 조절, 휠 버튼을 누른 채 끌면 이동 (표마다 따로 기억)"))
         lay.addLayout(bar)
         lay.addLayout(bar2)
         lay.addWidget(split, 1)
@@ -776,13 +848,13 @@ class AgentsTab(QWidget):
         return w
 
     def restyle(self) -> None:
-        self.table.verticalHeader().setDefaultSectionSize(px(40))
+        self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 40))
         # 글자가 잘리지 않게 내용에 맞추되, 긴 글(지금 상태, 계정, 결과)은 너무 넓어지지 않게 (전체는 툴팁)
         fit_columns(self.table, mins={0: 36, 3: 150}, caps={4: 260, 5: 230, 6: 230, 7: 200, 8: 320})
-        self.hist.verticalHeader().setDefaultSectionSize(px(30))
+        self.hist.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "hist_nav", None), 30))
         fit_columns(self.hist, mins={0: 120}, caps={5: 420})
-        self.pend.verticalHeader().setDefaultSectionSize(px(40))
-        fit_columns(self.pend, mins={4: 300, 6: 110}, caps={2: 280})
+        self.pend.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "pend_nav", None), 40))
+        fit_columns(self.pend, mins={4: 300, 6: 110, 7: 50}, caps={2: 280, 6: 180})
 
     def _toggle(self, pc_id: int, on: bool) -> None:
         (self.checked.add if on else self.checked.discard)(pc_id)
@@ -929,6 +1001,8 @@ class AgentsTab(QWidget):
         show = self.repo.me.is_admin and bool(self.pending)
         self.pending_box.setVisible(show)
         if not show:
+            self.pend.setRowCount(0)      # 다음에 다시 보일 때 예전 줄이 섞이지 않게
+            self._pending_key = None
             return
         taken = set(self.agents)
         key = (tuple(a.user_id for a in self.pending), tuple(p.id for p in self.pcs), tuple(sorted(taken)))
@@ -942,6 +1016,13 @@ class AgentsTab(QWidget):
             return
         self._pending_key = key
         self._plan_suggestions(taken)
+        if self.repo.me.is_super and hasattr(self, "bulk_team"):
+            cur = self.bulk_team.currentData()
+            self.bulk_team.clear()
+            for t in self.repo.teams:
+                self.bulk_team.addItem(t.name, t.id)
+            i = self.bulk_team.findData(cur if cur is not None else self.repo.team_id)
+            self.bulk_team.setCurrentIndex(max(i, 0))
         self.pend.setRowCount(len(self.pending))
         for r, ag in enumerate(self.pending):
             self.pend.setItem(r, 0, _item(ag.machine))
@@ -979,6 +1060,15 @@ class AgentsTab(QWidget):
             l.addStretch(1)
             self.pend.setCellWidget(r, 5, w)
             if self.repo.me.is_super:
+                ck = QCheckBox()
+                ck.setChecked(ag.user_id in self.pend_checked)
+                ck.toggled.connect(lambda on, a=ag: (self.pend_checked.add if on else self.pend_checked.discard)(a.user_id))
+                ckw = QWidget()
+                ckl = QHBoxLayout(ckw)
+                ckl.setContentsMargins(0, 0, 0, 0)
+                ckl.setAlignment(Qt.AlignCenter)
+                ckl.addWidget(ck)
+                self.pend.setCellWidget(r, 7, ckw)
                 tc = QComboBox()
                 tc.addItem("(팀 정하기)", None)
                 for t in self.repo.teams:
@@ -1055,6 +1145,45 @@ class AgentsTab(QWidget):
             self._redraw_pending()
             pc = next((p for p in self.pcs if p.id == pid), None)
             self._say(f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요.")
+
+    def _pend_check_all(self, on: bool) -> None:
+        self.pend_checked = {a.user_id for a in self.pending} if on else set()
+        self._redraw_pending()
+
+    def _bulk_team(self) -> None:
+        chosen = [a for a in self.pending if a.user_id in self.pend_checked]
+        if not chosen:
+            QMessageBox.information(self, "팀 정하기", "팀을 정할 실행기를 체크하세요 (오른쪽 '선택' 칸).")
+            return
+        code = self.bulk_code.text().strip().upper()
+        if code:
+            team = next((t for t in self.repo.teams if (t.join_code or "").upper() == code), None)
+            if team is None:
+                QMessageBox.warning(self, "팀 정하기", "그 실행 코드의 팀이 없어요. 팀 관리에서 코드를 확인하세요.")
+                return
+        else:
+            team = next((t for t in self.repo.teams if t.id == self.bulk_team.currentData()), None)
+        if team is None:
+            return
+        if QMessageBox.question(self, "팀 정하기", f"실행기 {len(chosen)}개를 '{team.name}' 팀으로 정할까요?") != QMessageBox.Yes:
+            return
+        errors = []
+        for a in chosen:
+            try:
+                self.repo.set_agent_team(a.user_id, team.id)
+            except RepoError as e:
+                errors.append(f"{a.machine}: {e}")
+        self.pend_checked = set()
+        self.bulk_code.clear()
+        if self.pend_all.isChecked():
+            self.pend_all.blockSignals(True)
+            self.pend_all.setChecked(False)
+            self.pend_all.blockSignals(False)
+        self._say(f"실행기 {len(chosen) - len(errors)}개를 '{team.name}' 팀으로 정했어요"
+                  + ("" if team.id == self.repo.team_id else " (그 팀을 고르면 보여요)"))
+        self._redraw_pending()
+        if errors:
+            QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
 
     def _set_team(self, ag: Agent, team_id) -> None:
         if team_id is None or team_id == ag.team_id:

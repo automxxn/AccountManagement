@@ -11,9 +11,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .common import button, fit_columns, page_header, px, run_safely, style_table
+from .common import button, copy_text, fit_columns, page_header, px, run_safely, style_table, zoom_rows
+from .sheet import SheetNav
 
-COLS = ["팀 이름", "관리자", "근무자", "컴퓨터", "계정", ""]
+COLS = ["팀 이름", "관리자", "근무자", "컴퓨터", "계정", "실행 코드", ""]
 
 
 def _padded(w: QWidget) -> QWidget:
@@ -33,6 +34,7 @@ class TeamsTab(QWidget):
         self.setObjectName("page")
         self.repo = repo
         hint = QLabel("팀마다 컴퓨터, 계정, 게임 종류, 변경 기록이 따로예요. 다른 팀 사람에게는 이 팀 데이터가 보이지 않아요.\n"
+                      "실행 코드: 각 PC의 LD CLOUD 실행기를 처음 켜면 코드를 물어봐요. 그 팀 코드를 넣으면 그 팀 연결 대기에 나타나요.\n"
                       "사람을 팀에 넣거나 관리자에게 팀을 맡기는 것은 '근무자 관리'에서 해요. "
                       "팀은 컴퓨터와 계정이 하나도 없을 때만 삭제할 수 있어요.")
         hint.setWordWrap(True)
@@ -45,6 +47,7 @@ class TeamsTab(QWidget):
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.nav = SheetNav(self.table, "zoom_teams", self.restyle)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(14)
@@ -80,11 +83,31 @@ class TeamsTab(QWidget):
             if pcs == 0 and accs == 0 and len(repo.teams) > 1:  # 비어 있는 팀만 지울 수 있다
                 bl.addWidget(button("삭제", "danger", lambda _=False, t=t: self._delete(t)))
             bl.addStretch(1)
-            self.table.setCellWidget(r, 5, box)
+            self.table.setCellWidget(r, 6, box)
+            # 팀 실행 코드: PC 실행기를 처음 켤 때 입력하면 이 팀 실행기가 됨
+            cbox = QWidget()
+            cl = QHBoxLayout(cbox)
+            cl.setContentsMargins(6, 4, 6, 4)
+            cl.setSpacing(6)
+            code = QLabel(f"<b>{t.join_code or '-'}</b>")
+            code.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            cl.addWidget(code)
+            cl.addWidget(button("복사", "ghost", lambda _=False, c=t.join_code: copy_text(c), "코드를 복사해요"))
+            cl.addWidget(button("새 코드", "", lambda _=False, t=t: self._new_code(t),
+                                "코드를 새로 만들어요. 예전 코드로는 더 이상 팀에 들어올 수 없어요 (이미 들어온 실행기는 그대로)"))
+            cl.addStretch(1)
+            self.table.setCellWidget(r, 5, cbox)
         self.restyle()
 
+    def _new_code(self, t) -> None:
+        if QMessageBox.question(self, "새 코드", f"'{t.name}' 팀 실행 코드를 새로 만들까요?\n"
+                                "예전 코드로는 더 이상 이 팀에 들어올 수 없어요. (이미 들어온 실행기는 그대로예요)") != QMessageBox.Yes:
+            return
+        if run_safely(self, self.repo.new_join_code, t.id):
+            self.refresh()
+
     def restyle(self) -> None:
-        self.table.verticalHeader().setDefaultSectionSize(px(44))
+        self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 44))
         fit_columns(self.table, mins={0: 160, 1: 160}, caps={1: 420})
 
     def _add(self) -> None:

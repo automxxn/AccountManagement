@@ -18,7 +18,10 @@ from PySide6.QtWidgets import (
 from ..cloud import LOGIN_DOMAIN
 from ..db import RepoError
 from ..models import ADMIN_ALWAYS, PERMS, ROLES, Profile
-from .common import button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused
+from .common import (
+    button, fit_columns, muted, page_header, px, run_safely, style_table, wheel_only_when_focused, zoom_rows,
+)
+from .sheet import SheetNav
 
 ASSIGN_COL_LABEL = "팀 배정"
 # 권한 칸 제목은 두 줄로 (열이 많아도 한 화면에 들어오게): '계정 정보 수정' → '계정\n정보 수정'
@@ -124,12 +127,14 @@ class WorkersTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setColumnHidden(ASSIGN_COL, not me.is_super)
+        self.nav = SheetNav(self.table, "zoom_workers", self.restyle)   # Ctrl+휠 = 표 크기, 휠 누르고 끌기 = 이동
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(14)
         lay.addWidget(page_header("근무자 관리", "가입 승인, 팀 배정, 사람별 권한을 정해요"))
         lay.addWidget(hint)
         lay.addWidget(self.table, 1)
+        lay.addWidget(muted("표 크기: Ctrl+휠로 조절, 휠 버튼을 누른 채 끌면 이동"))
 
     # ---------------------------------------------------------------- 권한 판단
     def _can_edit(self, p: Profile) -> bool:
@@ -245,7 +250,7 @@ class WorkersTab(QWidget):
             row.team_btn.setText(self._team_text(row.teams))
 
     def restyle(self) -> None:
-        self.table.verticalHeader().setDefaultSectionSize(px(44))
+        self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 44))
         # 열 제목과 내용이 잘리지 않게 (권한 칸은 제목 글자 폭에 맞춤)
         fit_columns(self.table, mins={0: 90, 1: 90, 2: 120, 3: 120, len(COLS) - 1: 80})
 

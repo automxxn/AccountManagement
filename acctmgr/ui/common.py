@@ -521,6 +521,11 @@ def copy_text(text: str) -> None:
     QApplication.clipboard().setText(text)
 
 
+def zoom_rows(nav, base: int) -> int:
+    """표 확대에 맞춘 줄 높이 (칸 안 버튼·상자가 들어가게 너무 작아지지는 않게)."""
+    return px(base * max(nav.zoom if nav else 1.0, 0.85))
+
+
 def fit_columns(table, mins: dict | None = None, caps: dict | None = None) -> None:
     """열 너비를 제목과 내용이 잘리지 않게 맞춘다.
 
@@ -529,6 +534,7 @@ def fit_columns(table, mins: dict | None = None, caps: dict | None = None) -> No
     """
     from PySide6.QtGui import QFont, QFontMetrics
     hdr = table.horizontalHeader()
+    table.ensurePolished()   # 확대/축소로 바뀐 글자 크기를 반영
     hf = QFont(table.font())
     hf.setBold(True)
     hfm = QFontMetrics(hf)
@@ -545,10 +551,11 @@ def fit_columns(table, mins: dict | None = None, caps: dict | None = None) -> No
             cw = table.cellWidget(r, c)
             if cw is not None:
                 w = max(w, cw.sizeHint().width() + px(6))
+        zoom = getattr(table, "_zoom", 1.0)
         if mins and c in mins:
-            w = max(w, px(mins[c]))
+            w = max(w, px(mins[c] * zoom))
         if caps and c in caps:
-            w = min(w, px(caps[c]))
+            w = min(w, px(caps[c] * zoom))
         table.setColumnWidth(c, w)
     hdr.setMinimumSectionSize(px(36))
 

@@ -314,8 +314,14 @@ class CloudRepository:
 
     # ------------------------------------------------------------------ 팀
     def list_teams(self) -> list[Team]:
-        return [Team(r["id"], r["name"], list(r.get("games") or DEFAULT_GAMES), r.get("key_check", ""))
-                for r in self._get("teams", {"select": "id,name,games,key_check", "order": "id"})]
+        return [Team(r["id"], r["name"], list(r.get("games") or DEFAULT_GAMES), r.get("key_check", ""),
+                     r.get("join_code") or "")
+                for r in self._get("teams", {"select": "*", "order": "id"})]
+
+    def new_join_code(self, team_id: int) -> str:
+        code = str(self._rpc("new_join_code", {"p_team": team_id}) or "")
+        self.teams = self.list_teams()
+        return code
 
     def team(self) -> Team | None:
         return next((t for t in self.teams if t.id == self.team_id), None)

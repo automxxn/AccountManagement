@@ -17,13 +17,14 @@ from .accounts import AccountsTab
 from .agents import AgentsTab
 from .common import (
     ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
+    zoom_rows,
 )
 from ..defaults import built_in
 from .connect import ConnectionDialog, clear_auto_login, settings
 from .update_ui import manual_check
 from .teams import TeamsTab
 from .workers import WorkersTab
-from .sheet import rebuild_columns
+from .sheet import SheetNav, rebuild_columns
 from .workplace import WorkplaceTab
 
 POLL_MS = 8000
@@ -48,10 +49,12 @@ class HistoryTab(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self.nav = SheetNav(self.table, "zoom_history", self.restyle)   # Ctrl+휠 = 표 크기, 휠 누르고 끌기 = 이동
         lay.addWidget(self.table, 1)
+        lay.addWidget(muted("표 크기: Ctrl+휠로 조절, 휠 버튼을 누른 채 끌면 이동"))
 
     def restyle(self) -> None:
-        self.table.verticalHeader().setDefaultSectionSize(px(34))
+        self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 34))
         self.table.resizeColumnsToContents()
 
     def refresh(self) -> None:
@@ -65,9 +68,11 @@ class HistoryTab(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, repo):
+    def __init__(self, repo, banner: str = ""):
         super().__init__()
         self.repo = repo
+        self.banner_text = banner          # 근무자 시점 보기 창이면 위에 띠를 보여줌
+        self._view_windows = []
         self.cloud = repo.is_cloud
         me = repo.me
         if not self.cloud:
@@ -113,7 +118,18 @@ class MainWindow(QMainWindow):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(0)
         h.addWidget(self._sidebar())
-        h.addWidget(self.stack, 1)
+        if self.banner_text:
+            right = QVBoxLayout()
+            right.setContentsMargins(0, 0, 0, 0)
+            right.setSpacing(0)
+            band = QLabel(self.banner_text)
+            band.setWordWrap(True)
+            band.setStyleSheet("background:#B45309; color:white; padding:8px 16px; font-weight:bold;")
+            right.addWidget(band)
+            right.addWidget(self.stack, 1)
+            h.addLayout(right, 1)
+        else:
+            h.addWidget(self.stack, 1)
         self.setCentralWidget(central)
 
         self._last_change = None
@@ -232,7 +248,10 @@ class MainWindow(QMainWindow):
             m.addAction("작업자 이름 바꾸기...", lambda: (self._ask_actor(), self._update_title()))
         if not built_in() and (not self.cloud or me.is_super):
             m.addAction("연결 설정... (다시 시작 필요)", self._connection)
-        if self.cloud:
+        if self.cloud and me.is_super and not self.banner_text:
+            m.addAction("근무자 시점으로 보기...", self._view_as)
+        if self.cloud and not self.banner_text:
+            m.addAction("다른 아이디로 로그인...", self._login_other)
             m.addAction("자동 로그인 끄기", self._auto_login_off)
         m.addSeparator()
         m.addAction(f"업데이트 확인... (지금 v{__version__})", self._check_update)
@@ -377,6 +396,50 @@ class MainWindow(QMainWindow):
     def _check_update(self) -> None:
         if manual_check(self):
             QApplication.quit()
+
+    def _view_as(self) -> None:
+        """총관리자: 고른 사람의 역할·팀·권한으로 보이는 화면을 따로 연다 (보기 전용)."""
+        from .viewas import ViewAsRepo
+        try:
+            people = [p for p in self.repo.list_workers() if p.role in ("admin", "worker")]
+        except RepoError as e:
+            QMessageBox.warning(self, "근무자 시점", str(e))
+            return
+        if not people:
+            QMessageBox.information(self, "근무자 시점", "볼 수 있는 근무자나 관리자가 없어요.")
+            return
+        names = {t.id: t.name for t in self.repo.teams}
+        items = [f"{p.display_name} ({ROLES.get(p.role, p.role)} · {', '.join(names.get(t, '?') for t in p.teams) or '팀 없음'})"
+                 for p in people]
+        choice, ok = QInputDialog.getItem(self, "근무자 시점으로 보기", "누구의 화면으로 볼까요?", items, 0, False)
+        if not ok:
+            return
+        who = people[items.index(choice)]
+        if not who.teams:
+            QMessageBox.information(self, "근무자 시점", "이 사람은 아직 팀이 없어서 볼 화면이 없어요.")
+            return
+        view = ViewAsRepo(self.repo, who)
+        w = MainWindow(view, banner=f"{who.display_name}({ROLES.get(who.role, who.role)}) 시점으로 보는 중 — 보기만 할 수 있어요. "
+                                    "데이터는 총관리자 로그인으로 읽어서 실제와 아주 조금 다를 수 있어요. 창을 닫으면 끝나요.")
+        w.setWindowTitle(f"[{who.display_name} 시점] AccountManagement v{__version__}")
+        w.resize(self.size())
+        w.show()
+        self._view_windows.append(w)
+
+    def _login_other(self) -> None:
+        """다른 아이디(예: 근무자 아이디)로 로그인: 프로그램을 다시 켜고 이번 한 번은 자동 로그인 없이 로그인 창을 띄운다."""
+        if QMessageBox.question(self, "다른 아이디로 로그인",
+                                "프로그램을 다시 켜고 로그인 창을 띄울까요?\n"
+                                "(이번 한 번만 자동 로그인을 건너뛰어요. 그 아이디의 비밀번호가 필요해요)") != QMessageBox.Yes:
+            return
+        import sys
+        from PySide6.QtCore import QProcess
+        settings().setValue("skip_auto_once", True)
+        args = [] if getattr(sys, "frozen", False) else sys.argv
+        if QProcess.startDetached(sys.executable, args):
+            QApplication.quit()
+        else:
+            QMessageBox.warning(self, "다른 아이디로 로그인", "다시 켜지 못했어요. 프로그램을 직접 껐다 켜 주세요.")
 
     def _auto_login_off(self) -> None:
         clear_auto_login(self.repo.url)

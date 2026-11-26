@@ -129,6 +129,7 @@ class SheetNav(QObject):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.viewport().installEventFilter(self)
+        self._style()   # 저장해 둔 표 크기를 바로 적용 (줄 높이·열 너비는 표를 그릴 때 맞춤)
 
     def font_px(self) -> int:
         return px(13 * self.zoom)
@@ -142,10 +143,14 @@ class SheetNav(QObject):
     def label(self) -> str:
         return f"표 크기 {round(self.zoom * 100)}%  ·  Ctrl+휠로 조절, 휠 누르고 끌면 이동"
 
-    def apply(self) -> None:
+    def _style(self) -> None:
+        self.table._zoom = self.zoom
         fs = self.font_px()
         self.table.setStyleSheet(f"QTableWidget {{ font-size: {fs}px; }} QHeaderView::section {{ font-size: {fs}px; }}"
                                  + self.extra_css)
+
+    def apply(self) -> None:
+        self._style()
         self.table.verticalHeader().setDefaultSectionSize(px(36 * self.zoom))
         self.on_change()
 
