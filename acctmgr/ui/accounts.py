@@ -18,10 +18,10 @@ from .dialogs import AccountDialog, CharacterDialog
 
 COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
            "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
-           "위치", "담당", "비고"]
-COL_WORKER = 14
+           "위치", "비고", "담당"]
+COL_WORKER = 15  # 담당은 맨 오른쪽
 CHAR_COLS = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
-WIDE_COLS = (7, 8, 9, 10, 15)
+WIDE_COLS = (7, 8, 9, 10, 14)
 TZOOM_MIN, TZOOM_MAX, TZOOM_STEP = 0.6, 2.0, 0.1  # 계정 표만 따로 쓰는 크기
 FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심"]
 
@@ -84,7 +84,7 @@ class AccountsTab(QWidget):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(True)
-        hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hh.setDefaultAlignment(Qt.AlignCenter)  # 열 제목은 가운데
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.cellDoubleClicked.connect(lambda r, c: None if c in CHAR_COLS else self._edit())
         self.table.setMouseTracking(True)
@@ -159,22 +159,32 @@ class AccountsTab(QWidget):
         if t == QEvent.Wheel and ev.modifiers() & Qt.ControlModifier:
             self._set_tzoom(self.tzoom + (TZOOM_STEP if ev.angleDelta().y() > 0 else -TZOOM_STEP))
             return True
+        # 휠 버튼을 꾹 누른 채 움직이면 표 보는 위치(시점)를 상하좌우로 옮긴다.
+        # 화면 좌표로 계산하고 마우스를 잡아 두므로 표 밖으로 나가도 계속 움직인다.
         if t == QEvent.MouseButtonPress and ev.button() == Qt.MiddleButton:
-            self._drag = (ev.position().toPoint(), self.table.horizontalScrollBar().value(),
+            self._drag = (ev.globalPosition().toPoint(), self.table.horizontalScrollBar().value(),
                           self.table.verticalScrollBar().value())
-            obj.setCursor(Qt.ClosedHandCursor)
+            obj.setCursor(Qt.SizeAllCursor)
+            obj.grabMouse()
             return True
         if t == QEvent.MouseMove and self._drag:
+            if not (ev.buttons() & Qt.MiddleButton):  # 버튼을 뗀 신호를 놓친 경우
+                self._end_drag(obj)
+                return False
             start, h0, v0 = self._drag
-            d = ev.position().toPoint() - start
+            d = ev.globalPosition().toPoint() - start
             self.table.horizontalScrollBar().setValue(h0 - d.x())
             self.table.verticalScrollBar().setValue(v0 - d.y())
             return True
-        if t == QEvent.MouseButtonRelease and ev.button() == Qt.MiddleButton:
-            self._drag = None
-            obj.setCursor(Qt.ArrowCursor)
+        if t == QEvent.MouseButtonRelease and ev.button() == Qt.MiddleButton and self._drag:
+            self._end_drag(obj)
             return True
         return False
+
+    def _end_drag(self, obj) -> None:
+        self._drag = None
+        obj.releaseMouse()
+        obj.setCursor(Qt.ArrowCursor)
 
     def refresh(self) -> None:
         self.accs = self.repo.list_accounts()

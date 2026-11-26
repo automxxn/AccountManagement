@@ -4,8 +4,8 @@ from __future__ import annotations
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette
 from PySide6.QtWidgets import (
-    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyledItemDelegate,
-    QTableWidget, QVBoxLayout, QWidget,
+    QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem, QTableWidget, QVBoxLayout, QWidget,
 )
 
 from ..db import RepoError
@@ -132,7 +132,7 @@ QTableWidget {{ background: {c['table_bg']}; border: 1px solid {c['line']}; bord
     color: {c['ink']}; }}
 QTableWidget QLineEdit {{ padding: 0 4px; border-radius: 0; }}
 QHeaderView::section {{ background: {c['header']}; border: none; border-bottom: 1px solid {c['line']};
-    border-right: 1px solid {c['grid']}; padding: {p(8)}px {p(6)}px; font-weight: bold; color: {c['header_ink']}; }}
+    border-right: 1px solid {c['grid']}; padding: {p(8)}px {p(14)}px; font-weight: bold; color: {c['header_ink']}; }}
 QTableCornerButton::section {{ background: {c['header']}; border: none; }}
 
 QFrame#card, QFrame#panel, QFrame#statCard {{ background: {c['surface']}; border: 1px solid {c['line']}; border-radius: 12px; }}
@@ -336,11 +336,25 @@ class ToggleSwitch(QAbstractButton):
 
 
 class GridDelegate(QStyledItemDelegate):
-    """표 칸 그리기: 세로(열) 구분선은 가늘게, 가로(행) 구분선은 굵게 해서 계정끼리 확실히 나뉘어 보이게."""
+    """표 칸 그리기: 칸 안쪽 좌우 여백, 세로(열) 구분선은 가늘게, 가로(행) 구분선은 굵게."""
+
+    PAD = 12  # 칸 안쪽 좌우 여백 (배율 적용 전)
+
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        s.setWidth(s.width() + 2 * px(self.PAD))
+        return s
 
     def paint(self, painter, option, index) -> None:
-        super().paint(painter, option, index)
         r = option.rect
+        opt = QStyleOptionViewItem(option)
+        if opt.state & QStyle.State_Selected:  # 선택 배경은 여백까지 칸 전체에
+            painter.fillRect(r, QColor(T("accent_soft")))
+            opt.state &= ~QStyle.State_Selected
+        opt.state &= ~QStyle.State_HasFocus
+        pad = px(self.PAD)
+        opt.rect = r.adjusted(pad, 0, -pad, 0)
+        super().paint(painter, opt, index)
         painter.save()
         painter.fillRect(r.right(), r.top(), 1, r.height(), QColor(T("col_line")))
         painter.fillRect(r.left(), r.bottom() - 1, r.width(), 2, QColor(T("row_line")))

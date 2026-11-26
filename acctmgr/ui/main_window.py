@@ -43,7 +43,7 @@ class HistoryTab(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
         lay.addWidget(self.table, 1)
 
     def restyle(self) -> None:
