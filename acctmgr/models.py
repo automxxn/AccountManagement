@@ -66,7 +66,7 @@ class Account:
     provider: str = "넥슨"
     login_id: str = ""
     password: str = ""
-    tag: str = ""  # 메월닉
+    tag: str = ""  # 메월코드
     mr_ban: Ban = field(default_factory=Ban)
     pl_ban: Ban = field(default_factory=Ban)
     withdrawn: bool = False
@@ -77,17 +77,33 @@ class Account:
     location: Location | None = None  # 조회 시 채워짐
 
     def chars(self, game: str) -> list[Character]:
-        return [c for c in self.characters if c.game == game]
+        """그 게임의 캐릭터 목록. 맨 앞이 대표 캐릭터."""
+        return [c for c in self.characters if c.game == game and c.text()]
+
+    def main(self, game: str) -> Character | None:
+        cs = self.chars(game)
+        return cs[0] if cs else None
+
+    def set_chars(self, game: str, chars: list[Character]) -> None:
+        """그 게임의 캐릭터를 통째로 바꾼다 (chars[0]이 대표)."""
+        others = [c for c in self.characters if c.game != game]
+        self.characters = (others + chars) if game == "플래닛" else (chars + others)
 
     def char_summary(self, game: str) -> str:
-        return ", ".join(c.text() for c in self.chars(game) if c.text())
+        cs = self.chars(game)
+        if len(cs) <= 1:
+            return cs[0].text() if cs else ""
+        return f"{cs[0].text()} (대표) 외 {len(cs) - 1}개"
 
     def main_char(self) -> str:
+        """작업장 카드에 보일 한 줄: 게임별 대표 캐릭터."""
+        parts = []
         for game in GAMES:
-            s = self.char_summary(game)
-            if s:
-                return f"[{game}] {s}"
-        return ""
+            m = self.main(game)
+            if m:
+                more = len(self.chars(game)) - 1
+                parts.append(f"[{game}] {m.text()}" + (f" 외 {more}" if more else ""))
+        return "  ".join(parts)
 
     def ban_labels(self) -> list[str]:
         out = []
@@ -99,17 +115,17 @@ class Account:
 
     @property
     def status(self) -> str:
-        if self.withdrawn:
-            return STATUS_WITHDRAWN
-        if self.location:
-            return STATUS_IN_USE
-        if self.mr_ban.active() and self.pl_ban.active():
-            return STATUS_BANNED
-        return STATUS_AVAILABLE
+        """작업장 기준 상태: 자리에 들어 있으면 사용중, 아니면 사용가능."""
+        return STATUS_IN_USE if self.location else STATUS_AVAILABLE
+
+    @property
+    def both_banned(self) -> bool:
+        return self.mr_ban.active() and self.pl_ban.active()
 
     @property
     def assignable(self) -> bool:
-        return self.status == STATUS_AVAILABLE
+        """빈 자리에 넣을 수 있는지 (자리에 없고 탈퇴하지 않음)."""
+        return not self.location and not self.withdrawn
 
     def search_text(self) -> str:
         parts = [self.owner, self.contact, self.provider, self.login_id, self.tag, self.note]

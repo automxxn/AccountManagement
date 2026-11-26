@@ -224,8 +224,8 @@ class WorkplaceTab(QWidget):
             self.selected = None
         self.stat_pc.set(len(self.pcs))
         self.stat_empty.set(sum(1 for p in self.pcs for x in p.slots if x is None))
-        self.stat_avail.set(sum(1 for a in self.accs.values() if a.status == STATUS_AVAILABLE))
-        self.stat_ban.set(sum(1 for a in self.accs.values() if a.status == STATUS_BANNED))
+        self.stat_avail.set(sum(1 for a in self.accs.values() if a.assignable))
+        self.stat_ban.set(sum(1 for a in self.accs.values() if a.both_banned))
         self._render_cards()
         self._render_panel()
 
@@ -343,7 +343,7 @@ class WorkplaceTab(QWidget):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(8)
         rows = [("아이디", a.login_id, a.login_id), ("비밀번호", "●" * 8 if a.password else "", a.password),
-                ("연락처", a.contact, None), ("메월닉", a.tag, None),
+                ("연락처", a.contact, None), ("메월코드", a.tag, None),
                 ("메랜", a.char_summary("메랜"), None), ("플래닛", a.char_summary("플래닛"), None)]
         if a.note:
             rows.append(("비고", a.note, None))
@@ -415,7 +415,7 @@ class WorkplaceTab(QWidget):
             self.pick_list.addItem(it)
             n += 1
         self.pick_count.setText(f"넣을 수 있는 계정 {n}개")
-        self.pick_count.setToolTip("어느 자리에도 없고, 탈퇴하지 않았고, 두 게임 모두 정지된 건 아닌 계정")
+        self.pick_count.setToolTip("어느 자리에도 없고 탈퇴하지 않은 계정")
         if n == 0:
             it = QListWidgetItem("조건에 맞는 계정이 없어요")
             it.setFlags(Qt.NoItemFlags)

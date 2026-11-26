@@ -13,12 +13,24 @@ from PySide6.QtWidgets import (
 from ..db import Repository
 from ..models import STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login
 from .common import COLORS, button, copy_text, muted, page_header, run_safely
-from .dialogs import AccountDialog
+from .dialogs import AccountDialog, CharacterDialog
 
-COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월닉", "메랜 캐릭터", "플래닛 캐릭터",
-           "정지", "위치", "담당", "비고"]
-COL_WORKER = 11
-FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "정지 있음", STATUS_WITHDRAWN, "중복 의심"]
+COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
+           "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
+           "위치", "담당", "비고"]
+COL_WORKER = 14
+CHAR_COLS = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
+WIDE_COLS = (7, 8, 9, 10, 15)
+FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심"]
+GREY = "#9AA0A8"
+RED = "#B42318"
+BLUE = "#1D4ED8"
+
+
+def ban_text(ban) -> str:
+    if not ban.active():
+        return ""
+    return f"정지 ~{ban.until}" if ban.until else "정지 (기한 없음)"
 
 
 class AccountsTab(QWidget):
@@ -74,7 +86,11 @@ class AccountsTab(QWidget):
         hh.setSectionResizeMode(QHeaderView.Interactive)
         hh.setStretchLastSection(True)
         hh.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.table.doubleClicked.connect(lambda _: self._edit())
+        self.table.cellClicked.connect(self._cell_clicked)
+        self.table.cellDoubleClicked.connect(lambda r, c: None if c in CHAR_COLS else self._edit())
+        self.table.setMouseTracking(True)
+        self.table.cellEntered.connect(
+            lambda r, c: self.table.viewport().setCursor(Qt.PointingHandCursor if c in CHAR_COLS else Qt.ArrowCursor))
 
         brow = QHBoxLayout()
         brow.setSpacing(6)
@@ -109,30 +125,33 @@ class AccountsTab(QWidget):
             self.worker_names = {w.id: w.display_name for w in self.repo.list_workers()}
         keys = Counter(norm_login(a.login_id) for a in self.accs)
         self.dups = {a.id for a in self.accs if keys[norm_login(a.login_id)] > 1}
-        counts = Counter(a.status for a in self.accs)
-        self.filter_btns["전체"].setText(f"전체 {len(self.accs)}")
-        for st in (STATUS_AVAILABLE, STATUS_IN_USE, STATUS_WITHDRAWN):
-            self.filter_btns[st].setText(f"{st} {counts[st]}")
-        self.filter_btns["정지 있음"].setText(f"정지 있음 {sum(1 for a in self.accs if a.ban_labels())}")
-        self.filter_btns["중복 의심"].setText(f"중복 의심 {len(self.dups)}")
+        n = {
+            "전체": len(self.accs),
+            STATUS_AVAILABLE: sum(1 for a in self.accs if a.assignable),
+            STATUS_IN_USE: sum(1 for a in self.accs if a.location),
+            "메랜정지": sum(1 for a in self.accs if a.mr_ban.active()),
+            "플래닛정지": sum(1 for a in self.accs if a.pl_ban.active()),
+            "탈퇴": sum(1 for a in self.accs if a.withdrawn),
+            "중복 의심": len(self.dups),
+        }
+        for name, b in self.filter_btns.items():
+            b.setText(f"{name} {n[name]}")
         self._render()
 
     def _visible(self) -> list[Account]:
         f = FILTERS[self.filter_group.checkedId()]
         q = self.search.text().strip().lower()
-        out = []
-        for a in self.accs:
-            if f in (STATUS_AVAILABLE, STATUS_IN_USE, STATUS_WITHDRAWN) and a.status != f:
-                continue
-            if f == "정지 있음" and not a.ban_labels():
-                continue
-            if f == "중복 의심" and a.id not in self.dups:
-                continue
-            if q and q not in a.search_text():
-                continue
-            out.append(a)
-        order = {STATUS_IN_USE: 0, STATUS_AVAILABLE: 1, STATUS_BANNED: 2, STATUS_WITHDRAWN: 3}
-        out.sort(key=lambda a: (order.get(a.status, 9), a.owner, a.login_id))
+        test = {
+            STATUS_AVAILABLE: lambda a: a.assignable,
+            STATUS_IN_USE: lambda a: bool(a.location),
+            "메랜정지": lambda a: a.mr_ban.active(),
+            "플래닛정지": lambda a: a.pl_ban.active(),
+            "탈퇴": lambda a: a.withdrawn,
+            "중복 의심": lambda a: a.id in self.dups,
+        }.get(f, lambda a: True)
+        out = [a for a in self.accs if test(a) and (not q or q in a.search_text())]
+        # 사용중 → 사용가능 → 탈퇴 순, 그 안에서는 명의자순
+        out.sort(key=lambda a: (0 if a.location else (2 if a.withdrawn else 1), a.owner, a.login_id))
         return out
 
     def _render(self) -> None:
@@ -140,28 +159,59 @@ class AccountsTab(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for r, a in enumerate(rows):
-            vals = [a.status, a.owner, a.contact, a.provider, a.login_id,
-                    a.password if self.show_pw else ("●" * 6 if a.password else ""),
-                    a.tag, a.char_summary("메랜"), a.char_summary("플래닛"), ", ".join(a.ban_labels()),
+            status = "-" if a.withdrawn else ("● " + a.status)
+            mr, pl = a.chars("메랜"), a.chars("플래닛")
+
+            def nick(cs):
+                if not cs:
+                    return ""
+                return cs[0].nickname + (f"  (대표 · 외 {len(cs) - 1})" if len(cs) > 1 else "")
+
+            vals = [status, a.owner, a.contact, a.provider, a.login_id,
+                    a.password if self.show_pw else ("●" * 6 if a.password else ""), a.tag,
+                    nick(mr), mr[0].level_job if mr else "", nick(pl), pl[0].level_job if pl else "",
+                    ban_text(a.mr_ban), ban_text(a.pl_ban),
                     a.location.text() if a.location else "",
                     self.worker_names.get(a.worker_id, "") if a.worker_id else "",
-                    a.note.replace("\n", " / ")]
+                    ("[탈퇴] " if a.withdrawn else "") + a.note.replace("\n", " / ")]
             for c, v in enumerate(vals):
-                it = QTableWidgetItem(("● " + v) if c == 0 else v)
+                it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, a.id)
-                if c == 0:
-                    it.setForeground(QColor(COLORS.get(a.status, COLORS[STATUS_WITHDRAWN])[1]))
+                color = None
+                if a.withdrawn:
+                    color = GREY
+                elif c == 0:
+                    color = COLORS[a.status][1]
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)
-                if c == 9 and v:
-                    it.setForeground(QColor(COLORS[STATUS_BANNED][1]))
+                elif c in (11, 12) and v:
+                    color = RED
+                elif c in CHAR_COLS:
+                    cs = mr if CHAR_COLS[c] == "메랜" else pl
+                    if len(cs) > 1:
+                        color = BLUE
+                    it.setToolTip("\n".join(("★ " if i == 0 else "   ") + ch.text() for i, ch in enumerate(cs))
+                                  + ("\n\n눌러서 캐릭터 추가/수정/대표 변경" if cs else "눌러서 캐릭터 추가"))
+                if color:
+                    it.setForeground(QColor(color))
+                if a.withdrawn:
+                    it.setToolTip("탈퇴한 계정 (작업장에 넣을 수 없어요)")
                 self.table.setItem(r, c, it)
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
-        for c in (7, 8, 12):
-            self.table.setColumnWidth(c, min(self.table.columnWidth(c), 240))
-        self.count_label.setText(f"{len(rows)}개 표시")
+        for c in WIDE_COLS:
+            self.table.setColumnWidth(c, min(self.table.columnWidth(c) + 8, 220))
+        self.count_label.setText(f"{len(rows)}개 표시 · 캐릭터 칸을 누르면 캐릭터 창이 열려요")
+
+    def _cell_clicked(self, r: int, c: int) -> None:
+        if c not in CHAR_COLS:
+            return
+        it = self.table.item(r, 0)
+        a = next((x for x in self.accs if it and x.id == it.data(Qt.UserRole)), None)
+        if a and CharacterDialog(self.repo, a, CHAR_COLS[c], self).exec():
+            self.refresh()
+            self.changed.emit()
 
     def _current(self) -> Account | None:
         r = self.table.currentRow()

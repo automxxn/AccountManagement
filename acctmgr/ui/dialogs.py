@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import re
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
@@ -61,6 +63,151 @@ class BanField(QWidget):
         return Ban(self.check.isChecked(), self.until.text().strip() if self.check.isChecked() else "")
 
 
+class CharacterEditor(QWidget):
+    """한 게임의 캐릭터 목록 편집기. 맨 위 줄이 대표 캐릭터."""
+
+    def __init__(self, game: str, chars: list[Character], editable: bool = True, parent=None):
+        super().__init__(parent)
+        self.game = game
+        self.editable = editable
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["", "닉네임", "레벨/직업"])
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, 56)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setShowGrid(False)
+        if not editable:
+            self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        for c in chars:
+            self._append(c.nickname, c.level_job)
+
+        head = QHBoxLayout()
+        head.addWidget(section(f"{game} 캐릭터"))
+        head.addStretch(1)
+        self.count = muted()
+        head.addWidget(self.count)
+        btns = QHBoxLayout()
+        btns.setSpacing(6)
+        self.b_add = QPushButton("+ 추가")
+        self.b_add.clicked.connect(self._add)
+        self.b_main = QPushButton("대표로 지정")
+        self.b_main.setToolTip("선택한 캐릭터를 대표로 바꿔요. 대표는 작업장과 계정 표에 보여요.")
+        self.b_main.clicked.connect(self._make_main)
+        self.b_del = QPushButton("삭제")
+        self.b_del.setObjectName("danger")
+        self.b_del.clicked.connect(self._delete)
+        for b in (self.b_add, self.b_main, self.b_del):
+            b.setEnabled(editable)
+        btns.addWidget(self.b_add)
+        btns.addWidget(self.b_main)
+        btns.addStretch(1)
+        btns.addWidget(self.b_del)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addLayout(head)
+        lay.addWidget(self.table, 1)
+        lay.addLayout(btns)
+        self._mark()
+
+    def _append(self, nick: str = "", job: str = "") -> int:
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        mark = QTableWidgetItem("")
+        mark.setFlags(mark.flags() & ~Qt.ItemIsEditable)
+        self.table.setItem(r, 0, mark)
+        self.table.setItem(r, 1, QTableWidgetItem(nick))
+        self.table.setItem(r, 2, QTableWidgetItem(job))
+        return r
+
+    def _mark(self) -> None:
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            it.setText("대표" if r == 0 else "")
+            it.setForeground(QColor("#1D4ED8"))
+            f = it.font()
+            f.setBold(True)
+            it.setFont(f)
+        n = self.table.rowCount()
+        self.count.setText(f"{n}개" if n else "없음")
+
+    def _rows(self) -> list[tuple[str, str]]:
+        out = []
+        for r in range(self.table.rowCount()):
+            out.append(((self.table.item(r, 1) or QTableWidgetItem("")).text(),
+                        (self.table.item(r, 2) or QTableWidgetItem("")).text()))
+        return out
+
+    def _add(self) -> None:
+        r = self._append()
+        self._mark()
+        self.table.setCurrentCell(r, 1)
+        self.table.editItem(self.table.item(r, 1))
+
+    def _make_main(self) -> None:
+        r = self.table.currentRow()
+        if r <= 0:
+            return
+        rows = self._rows()
+        rows.insert(0, rows.pop(r))
+        for i, (n, j) in enumerate(rows):
+            self.table.item(i, 1).setText(n)
+            self.table.item(i, 2).setText(j)
+        self.table.setCurrentCell(0, 1)
+        self._mark()
+
+    def _delete(self) -> None:
+        r = self.table.currentRow()
+        if r >= 0:
+            self.table.removeRow(r)
+            self._mark()
+
+    def value(self) -> list[Character]:
+        return [Character(self.game, n.strip(), j.strip()) for n, j in self._rows() if n.strip() or j.strip()]
+
+
+class CharacterDialog(QDialog):
+    """계정 표에서 캐릭터 칸을 눌렀을 때 여는 창: 그 게임의 캐릭터 추가/수정/삭제, 대표 변경."""
+
+    def __init__(self, repo: Repository, acc: Account, game: str, parent=None):
+        super().__init__(parent)
+        self.repo = repo
+        self.acc = copy.deepcopy(acc)
+        self.game = game
+        can = repo.me.can("can_edit_account")
+        self.setWindowTitle(f"{game} 캐릭터 — {acc.owner or acc.login_id}")
+        self.resize(560, 420)
+        self.editor = CharacterEditor(game, self.acc.chars(game), can)
+        box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        box.button(QDialogButtonBox.Save).setText("저장")
+        box.button(QDialogButtonBox.Save).setObjectName("primary")
+        box.button(QDialogButtonBox.Save).setEnabled(can)
+        box.button(QDialogButtonBox.Cancel).setText("닫기")
+        box.accepted.connect(self._save)
+        box.rejected.connect(self.reject)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.addWidget(muted(f"[{acc.provider}] {acc.login_id}" + ("" if can else "  ·  수정 권한이 없어서 보기만 할 수 있어요")))
+        lay.addWidget(self.editor, 1)
+        lay.addWidget(box)
+
+    def _save(self) -> None:
+        self.acc.set_chars(self.game, self.editor.value())
+        try:
+            self.repo.save_account(self.acc)
+        except RepoError as e:
+            QMessageBox.warning(self, "저장 안 됨", str(e))
+            return
+        self.accept()
+
+
 def worker_combo(repo, current: str | None) -> QComboBox | None:
     """클라우드 관리자에게만 담당자 선택 상자를 만들어 준다."""
     if not (repo.is_cloud and repo.me.is_admin):
@@ -85,7 +232,6 @@ class AccountDialog(QDialog):
         self.acc = copy.deepcopy(acc) if acc else Account()
         self.can_save = repo.me.can("can_edit_account" if acc else "can_add_account")
         self.setWindowTitle(("계정 수정" if self.can_save else "계정 정보") if acc else "계정 추가")
-        self.resize(620, 660)
         a = self.acc
 
         form = QFormLayout()
@@ -114,7 +260,7 @@ class AccountDialog(QDialog):
         form.addRow("유형", self.provider)
         form.addRow("아이디 *", self.login)
         form.addRow("비밀번호", self.pw)
-        form.addRow("메월닉", self.tag)
+        form.addRow("메월코드", self.tag)
         form.addRow(section("상태"))
         form.addRow("메랜정지", self.mr_ban)
         form.addRow("플래닛정지", self.pl_ban)
@@ -122,24 +268,7 @@ class AccountDialog(QDialog):
         form.addRow(section("메모"))
         form.addRow("비고", self.note)
 
-        self.chars = QTableWidget(0, 3)
-        self.chars.setHorizontalHeaderLabels(["게임", "닉네임", "레벨/직업"])
-        self.chars.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.chars.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.chars.verticalHeader().setVisible(False)
-        for c in a.characters:
-            self._add_char_row(c)
-        add_mr = QPushButton("+ 메랜 캐릭터")
-        add_mr.clicked.connect(lambda: self._add_char_row(Character("메랜")))
-        add_pl = QPushButton("+ 플래닛 캐릭터")
-        add_pl.clicked.connect(lambda: self._add_char_row(Character("플래닛")))
-        rm = QPushButton("선택 캐릭터 삭제")
-        rm.clicked.connect(self._remove_char_row)
-        btns = QHBoxLayout()
-        btns.addWidget(add_mr)
-        btns.addWidget(add_pl)
-        btns.addStretch(1)
-        btns.addWidget(rm)
+        self.editors = {g: CharacterEditor(g, a.chars(g), self.can_save) for g in GAMES}
 
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("저장")
@@ -148,36 +277,27 @@ class AccountDialog(QDialog):
         box.accepted.connect(self._save)
         box.rejected.connect(self.reject)
         box.button(QDialogButtonBox.Save).setEnabled(self.can_save)
-        for b in (add_mr, add_pl, rm):
-            b.setEnabled(self.can_save)
 
+        self.resize(1020, 660)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 16, 20, 16)
         if not self.can_save:
             lay.addWidget(muted("수정 권한이 없어서 보기만 할 수 있어요. (비번 보기/복사는 돼요)"))
         if a.location:
             lay.addWidget(muted(f"현재 위치: {a.location.text()}"))
-        lay.addLayout(form)
-        lay.addWidget(section("캐릭터 (게임마다 여러 개 가능)"))
-        lay.addWidget(self.chars, 1)
-        lay.addLayout(btns)
+        cols = QHBoxLayout()
+        cols.setSpacing(24)
+        left = QWidget()
+        left.setLayout(form)
+        left.setFixedWidth(470)
+        cols.addWidget(left)
+        right = QVBoxLayout()
+        right.setSpacing(12)
+        for g in GAMES:
+            right.addWidget(self.editors[g], 1)
+        cols.addLayout(right, 1)
+        lay.addLayout(cols, 1)
         lay.addWidget(box)
-
-    def _add_char_row(self, c: Character) -> None:
-        r = self.chars.rowCount()
-        self.chars.insertRow(r)
-        game = QComboBox()
-        game.addItems(GAMES)
-        game.setCurrentText(c.game)
-        self.chars.setCellWidget(r, 0, game)
-        self.chars.setItem(r, 1, QTableWidgetItem(c.nickname))
-        self.chars.setItem(r, 2, QTableWidgetItem(c.level_job))
-
-    def _remove_char_row(self) -> None:
-        rows = sorted({i.row() for i in self.chars.selectedIndexes()}, reverse=True)
-        if not rows and self.chars.currentRow() >= 0:
-            rows = [self.chars.currentRow()]
-        for r in rows:
-            self.chars.removeRow(r)
 
     def _save(self) -> None:
         a = self.acc
@@ -198,11 +318,8 @@ class AccountDialog(QDialog):
         a.withdrawn = self.withdrawn.isChecked()
         a.note = self.note.toPlainText().strip()
         a.characters = []
-        for r in range(self.chars.rowCount()):
-            game = self.chars.cellWidget(r, 0).currentText()
-            nick = (self.chars.item(r, 1) or QTableWidgetItem("")).text()
-            job = (self.chars.item(r, 2) or QTableWidgetItem("")).text()
-            a.characters.append(Character(game, nick, job))
+        for g in GAMES:
+            a.characters += self.editors[g].value()
         if a.withdrawn and a.location:
             if QMessageBox.question(self, "탈퇴 처리",
                                     f"이 계정은 {a.location.text()}에 들어 있어요. 탈퇴로 바꾸면 자리에서 빠져요. 계속할까요?") \
