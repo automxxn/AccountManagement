@@ -299,6 +299,8 @@ class WorkplaceTab(QWidget):
         t.clearContents()
         t.setRowCount(sum(len(pc.slots) for pc in pcs) + len(pcs))
         bold = self.nav.bold_font()
+        no_font = QFont(bold)
+        no_font.setPixelSize(px(22 * self.nav.zoom))
         show_pw = self.pw_btn.isChecked()
         can_edit = self._can_edit_pc()
         ncols = t.columnCount()
@@ -337,7 +339,7 @@ class WorkplaceTab(QWidget):
                             it.setToolTip("더블클릭해서 바로 수정 · Ctrl+C 복사 · Ctrl+V 붙여넣기" if can_edit
                                           else "Ctrl+C 복사")
                         if c == 0:
-                            it.setFont(bold)
+                            it.setFont(no_font)  # 번호는 크게 (칸 너비는 그대로)
                             it.setForeground(QColor(T("accent_text")))
                         t.setItem(r, c, it)
                 slot_it = QTableWidgetItem(str(i))
