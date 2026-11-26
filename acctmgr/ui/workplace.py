@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import html
 
-from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
@@ -22,13 +22,15 @@ from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetN
 
 PC_FILTERS = ["모든 컴퓨터", "빈 자리가 있는 컴퓨터", "정지 계정이 있는 컴퓨터"]
 MIN_SLOTS = 2  # 컴퓨터마다 기본 자리 수 (이 밑으로는 줄일 수 없음)
-PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "AnyDesk 암호", "컴퓨터 담당", "자리"]
+PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "AnyDesk 암호", "자리"]
+PC_INFO_COLS = range(0, 5)  # 컴퓨터 정보 칸 (자리 줄끼리 세로로 합침)
 EDIT_COLS = {1: "name", 2: "ld_cloud", 3: "anydesk_id", 4: "anydesk_pw"}  # 더블클릭으로 바로 수정, Ctrl+C/V
 REAL_ROLE = Qt.UserRole + 2         # 가려진 칸(암호)의 실제 값
 GAP_ROLE = Qt.UserRole + 3          # 컴퓨터 사이 간격 줄
 GROUP_START_ROLE = Qt.UserRole + 4  # 컴퓨터 칸의 첫 줄 (위쪽 테두리)
-PC_WORKER_COL = 5
 OFF = len(PC_COLUMNS)  # 계정 열이 시작하는 위치
+PC_WORKER_COL = OFF + len(ACCOUNT_COLUMNS)  # 컴퓨터 담당 (맨 오른쪽 끝)
+ALL_HEADERS = PC_COLUMNS + ACCOUNT_COLUMNS + ["컴퓨터 담당"]
 
 
 def _repolish(w: QWidget) -> None:
@@ -130,6 +132,7 @@ class WorkplaceTab(QWidget):
         self.pcs: list[PC] = []
         self.accs: dict[int, Account] = {}
         self.selected: tuple[int, int] | None = None
+        self.selected_cell: tuple[int, int] | None = None  # (컴퓨터 id, 열): 컴퓨터 정보 칸 하나를 고른 경우
         self.worker_names: dict[str | None, str] = {}  # 클라우드 관리자에게만 담당자 표시
 
         root = QVBoxLayout(self)
@@ -175,10 +178,11 @@ class WorkplaceTab(QWidget):
 
         # 시트: [컴퓨터 정보 | 자리 | 계정 화면과 같은 열]
         self.show_worker = repo.is_cloud and repo.me.is_admin
-        self.table = BlockTable(0, OFF + len(ACCOUNT_COLUMNS))
-        self.table.setHorizontalHeaderLabels(PC_COLUMNS + ACCOUNT_COLUMNS)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table = BlockTable(0, len(ALL_HEADERS))
+        self.table.setHorizontalHeaderLabels(ALL_HEADERS)
+        # 선택은 직접 정한다: 컴퓨터 정보 칸은 그 칸 하나, 자리는 그 줄의 자리+계정 칸만
+        self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
         style_table(self.table)
         self.table.setItemDelegate(SheetDelegate(self.table, self._commit_pc_cell))
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -246,6 +250,8 @@ class WorkplaceTab(QWidget):
             pc = self._pc(self.selected[0])
             if not pc or self.selected[1] > len(pc.slots):
                 self.selected = None
+        if self.selected_cell and not self._pc(self.selected_cell[0]):
+            self.selected_cell = None
         self.stat_pc.set(len(self.pcs))
         self.stat_empty.set(sum(1 for p in self.pcs for x in p.slots if x is None))
         self.stat_avail.set(sum(1 for a in self.accs.values() if a.assignable))
@@ -299,7 +305,6 @@ class WorkplaceTab(QWidget):
         row_h = px(36 * self.nav.zoom)
         self._row_map = []
         r = 0
-        sel_row = -1
         blocks = []
         for k, pc in enumerate(pcs):
             if True:  # 블록 위 간격 줄
@@ -316,14 +321,15 @@ class WorkplaceTab(QWidget):
             for i, aid in enumerate(pc.slots, start=1):
                 self._row_map.append((pc.id, i))
                 t.setRowHeight(r, row_h)
-                if self.selected == (pc.id, i):
-                    sel_row = r
                 end = {GROUP_END_ROLE: False}
                 if i == 1:
                     worker = ((self.worker_names.get(pc.worker_id, "?") if pc.worker_id else "없음")
                               if self.show_worker else "")
                     pw = pc.anydesk_pw if show_pw else ("●" * 6 if pc.anydesk_pw else "")
-                    for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pw, worker]):
+                    w_it = QTableWidgetItem(worker)
+                    w_it.setTextAlignment(Qt.AlignCenter)
+                    t.setItem(r, PC_WORKER_COL, w_it)
+                    for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pw]):
                         it = QTableWidgetItem(v)
                         it.setTextAlignment(Qt.AlignCenter)
                         if c in EDIT_COLS:
@@ -353,23 +359,19 @@ class WorkplaceTab(QWidget):
                 r += 1
             blocks.append((start, r - 1))
             if n > 1:
-                for c in range(OFF - 1):
+                for c in list(PC_INFO_COLS) + [PC_WORKER_COL]:
                     t.setSpan(start, c, n, 1)
         t.blocks = blocks
-        t.active_block = next(((a, b) for a, b in blocks
-                               if self.selected and self._row_map[a] and self._row_map[a][0] == self.selected[0]), None)
+        self._update_active_block()
         cap_widths(t, OFF, self.nav.zoom)
         # 합친 칸(컴퓨터 정보)은 자동 너비 계산에서 빠지므로 글자 길이로 직접 맞춘다
         fm = QFontMetrics(bold)
         pad = px(GridDelegate.PAD) * 2 + px(10)
-        for c in range(OFF):
-            texts = [PC_COLUMNS[c]] + [t.item(row, c).text() for row in range(t.rowCount())
-                                       if t.item(row, c) and self._row_map[row]]
+        for c in list(range(OFF)) + [PC_WORKER_COL]:
+            texts = [ALL_HEADERS[c]] + [t.item(row, c).text() for row in range(t.rowCount())
+                                        if t.item(row, c) and self._row_map[row]]
             t.setColumnWidth(c, max(fm.horizontalAdvance(x) for x in texts) + pad)
-        if sel_row >= 0:
-            t.selectRow(sel_row)
-        else:
-            t.clearSelection()
+        self._apply_selection()
         t.horizontalScrollBar().setValue(hpos)
         t.verticalScrollBar().setValue(vpos)
         self.tzoom_btn.setText(self.nav.label())
@@ -386,11 +388,58 @@ class WorkplaceTab(QWidget):
         pc_id, slot = self._row_map[r]
         pc = self._pc(pc_id)
         aid = pc.slots[slot - 1] if pc else None
+        if c in PC_INFO_COLS or c == PC_WORKER_COL:
+            self.select_pc_cell(pc_id, c)
+            return
         if (c - OFF) in ACC_CHAR and aid in self.accs:
+            self.select_slot(pc_id, slot, c)
             if CharacterDialog(self.repo, self.accs[aid], ACC_CHAR[c - OFF], self).exec():
                 self._after_change()
             return
-        self.select_slot(pc_id, slot)
+        self.select_slot(pc_id, slot, c)
+
+    def _row_of(self, pc_id: int, slot: int) -> int:
+        return next((i for i, x in enumerate(self._row_map) if x == (pc_id, slot)), -1)
+
+    def _apply_selection(self, cur_col: int | None = None) -> None:
+        """선택 표시: 컴퓨터 정보 칸 하나, 또는 고른 자리 줄의 자리+계정 칸."""
+        t = self.table
+        hpos, vpos = t.horizontalScrollBar().value(), t.verticalScrollBar().value()
+        sm = t.selectionModel()
+        sm.clearSelection()
+        model = t.model()
+        if self.selected_cell:
+            row = self._row_of(self.selected_cell[0], 1)
+            if row >= 0:
+                idx = model.index(row, self.selected_cell[1])
+                sm.select(idx, QItemSelectionModel.Select)
+                sm.setCurrentIndex(idx, QItemSelectionModel.NoUpdate)
+        elif self.selected:
+            row = self._row_of(*self.selected)
+            if row >= 0:
+                left, right = model.index(row, OFF - 1), model.index(row, OFF + len(ACCOUNT_COLUMNS) - 1)
+                sm.select(QItemSelection(left, right), QItemSelectionModel.Select)
+                col = cur_col if cur_col is not None and OFF - 1 <= cur_col < PC_WORKER_COL else OFF
+                sm.setCurrentIndex(model.index(row, col), QItemSelectionModel.NoUpdate)
+        # 선택만 바꾸고 보던 위치는 그대로 (자동 스크롤로 첫 열이 가려지지 않게)
+        t.horizontalScrollBar().setValue(hpos)
+        t.verticalScrollBar().setValue(vpos)
+        t.viewport().update()
+
+    def _update_active_block(self) -> None:
+        pc_id = self.selected[0] if self.selected else (self.selected_cell[0] if self.selected_cell else None)
+        t = self.table
+        t.active_block = next(((a, b) for a, b in t.blocks
+                               if pc_id is not None and self._row_map[a] and self._row_map[a][0] == pc_id), None)
+        t.viewport().update()
+
+    def select_pc_cell(self, pc_id: int, col: int) -> None:
+        """컴퓨터 정보 칸 하나만 선택 (복사/바로 수정용). 오른쪽 패널에는 그 컴퓨터 도구를 보여준다."""
+        self.selected = None
+        self.selected_cell = (pc_id, col)
+        self._update_active_block()
+        self._apply_selection()
+        self._render_panel()
 
     def _can_edit_pc(self) -> bool:
         return self.repo.me.is_admin or self.repo.me.can("can_edit_pc")
@@ -453,6 +502,18 @@ class WorkplaceTab(QWidget):
     def _render_panel(self) -> None:
         self._clear_panel()
         L = self.panel_lay
+        if not self.selected and self.selected_cell and self._pc(self.selected_cell[0]):
+            pc = self._pc(self.selected_cell[0])
+            self.panel_title.setText(f"{pc.no}번 컴퓨터")
+            self.panel_sub.setText(pc.name)
+            self._pc_tools(pc)
+            t = QLabel("· 칸을 더블클릭하면 바로 수정돼요.\n· Ctrl+C로 복사, Ctrl+V로 붙여넣기 할 수 있어요.\n"
+                       "· 자리 줄을 누르면 그 자리의 계정 정보가 나와요.")
+            t.setObjectName("help")
+            t.setWordWrap(True)
+            L.addWidget(t)
+            L.addStretch(1)
+            return
         if not self.selected:
             self.panel_title.setText("자리를 선택하세요")
             self.panel_sub.setText("왼쪽 목록에서 자리를 누르세요.")
@@ -672,14 +733,11 @@ class WorkplaceTab(QWidget):
         return w
 
     # ---------------------------------------------------------------- 동작
-    def select_slot(self, pc_id: int, slot: int) -> None:
+    def select_slot(self, pc_id: int, slot: int, col: int | None = None) -> None:
         self.selected = (pc_id, slot)
-        self.table.active_block = next(((a, b) for a, b in self.table.blocks
-                                        if self._row_map[a] and self._row_map[a][0] == pc_id), None)
-        self.table.viewport().update()
-        rows = [i for i, x in enumerate(self._row_map) if x == (pc_id, slot)]
-        if rows:
-            self.table.selectRow(rows[0])
+        self.selected_cell = None
+        self._update_active_block()
+        self._apply_selection(col)
         self._render_panel()
 
     def open_slot(self, pc_id: int, slot: int) -> None:
