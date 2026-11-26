@@ -10,11 +10,8 @@ from ..version import __version__
 
 def offer(parent, info: updater.UpdateInfo) -> bool:
     """업데이트를 권하고, 설치를 시작했으면 True (호출한 쪽은 프로그램을 끝내야 함)."""
-    notes = info.notes.strip()
-    text = f"새 버전 {info.version}이(가) 나왔어요. (지금 버전 {__version__})\n\n"
-    if notes:
-        text += notes[:800] + "\n\n"
-    text += "지금 업데이트할까요? 업데이트하면 프로그램이 자동으로 다시 시작돼요."
+    text = (f"새 버전 {info.version}이(가) 나왔어요. (지금 버전 {__version__})\n\n"
+            "지금 업데이트할까요? 업데이트하면 프로그램이 자동으로 다시 시작돼요.")
     box = QMessageBox(QMessageBox.Information, "업데이트", text, parent=parent)
     yes = box.addButton("지금 업데이트", QMessageBox.AcceptRole)
     box.addButton("나중에", QMessageBox.RejectRole)
