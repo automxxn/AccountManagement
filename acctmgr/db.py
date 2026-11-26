@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from .models import PC, Account, Ban, Character, Location, Profile, norm_login
+from .models import PC, Account, Ban, Character, Location, Profile, norm_login, owner_rule_violation
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -293,6 +293,7 @@ class Repository:
         where = self.conn.execute("SELECT pc_id, slot FROM assignments WHERE account_id=?", (account_id,)).fetchone()
         if where:
             raise RepoError(f"이 계정은 이미 {self._pc_label(where['pc_id'], where['slot'])}에 들어 있어요.")
+        self._check_owner_rule(account_id, pc_id)
         try:
             with self.conn:
                 self.conn.execute(
@@ -301,6 +302,13 @@ class Repository:
                 self._log("배정", f"{self._pc_label(pc_id, slot)} ← {self._acc_label(account_id)}")
         except sqlite3.IntegrityError:
             raise RepoError("그 자리에 이미 다른 계정이 들어갔어요. 새로고침 후 다시 시도하세요.")
+
+    def _check_owner_rule(self, account_id: int, pc_id: int) -> None:
+        accs = self.list_accounts()
+        acc = next((a for a in accs if a.id == account_id), None)
+        why = owner_rule_violation(acc, pc_id, accs) if acc else None
+        if why:
+            raise RepoError(why)
 
     def unassign(self, pc_id: int, slot: int) -> None:
         r = self.conn.execute("SELECT account_id FROM assignments WHERE pc_id=? AND slot=?", (pc_id, slot)).fetchone()
@@ -316,6 +324,7 @@ class Repository:
             raise RepoError("이 계정은 어느 자리에도 없어요.")
         if self.conn.execute("SELECT 1 FROM assignments WHERE pc_id=? AND slot=?", (to_pc_id, to_slot)).fetchone():
             raise RepoError("옮길 자리에 이미 계정이 있어요.")
+        self._check_owner_rule(account_id, to_pc_id)
         try:
             with self.conn:
                 self.conn.execute("UPDATE assignments SET pc_id=?, slot=?, assigned_at=? WHERE account_id=?",

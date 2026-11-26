@@ -159,6 +159,11 @@ class Account:
         """빈 자리에 넣을 수 있는지 (자리에 없고 탈퇴하지 않음)."""
         return not self.location and not self.withdrawn
 
+    @property
+    def owner_key(self) -> str:
+        """명의자 규칙에 쓰는 기준: 명의자 이름, 없으면 연락처. 둘 다 없으면 규칙 적용 안 함."""
+        return (self.owner or "").strip() or (self.contact or "").strip()
+
     def search_text(self) -> str:
         parts = [self.owner, self.contact, self.provider, self.login_id, self.tag, self.note]
         parts += [c.text() for c in self.characters]
@@ -211,3 +216,25 @@ class Profile:
 
     def can(self, perm: str) -> bool:
         return self.is_admin or (self.role == "worker" and bool(getattr(self, perm, False)))
+
+
+MAX_PER_OWNER = 2  # 같은 명의자 계정은 작업장 전체에서 최대 2개, 그리고 같은 컴퓨터에만
+
+
+def owner_rule_violation(acc: Account, target_pc_id: int, accounts: list[Account]) -> str | None:
+    """acc를 target_pc_id 컴퓨터에 넣으면 명의자 규칙을 어기는지. 어기면 이유, 괜찮으면 None.
+
+    규칙: 같은 명의자 계정은 작업장 전체에 최대 2개까지, 그리고 그 2개는 같은 컴퓨터에 있어야 한다.
+    """
+    key = acc.owner_key
+    if not key:
+        return None
+    others = [a for a in accounts if a.id != acc.id and a.location and a.owner_key == key]
+    if len(others) >= MAX_PER_OWNER:
+        where = ", ".join(sorted({f"{a.location.pc_no}번" for a in others}))
+        return f"명의자 '{key}'의 계정이 이미 {len(others)}개 들어가 있어요({where} 컴퓨터). 같은 명의 계정은 최대 {MAX_PER_OWNER}개까지예요."
+    for a in others:
+        if a.location.pc_id != target_pc_id:
+            return (f"명의자 '{key}'의 계정이 이미 {a.location.pc_no}번 컴퓨터에 있어요. "
+                    f"같은 명의 계정은 같은 컴퓨터에만 넣을 수 있어요.")
+    return None

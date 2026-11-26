@@ -353,6 +353,38 @@ begin
     perform _log('컴퓨터 삭제', coalesce(v_label, '') || ' (들어 있던 계정은 사용가능으로 돌아감)');
 end $$;
 
+-- ============================================================ 명의자 규칙
+-- 같은 명의자 계정은 작업장 전체에 최대 2개까지, 그리고 그 2개는 같은 컴퓨터에만 넣을 수 있다.
+-- 명의자 이름이 비어 있으면 연락처로 판단하고, 둘 다 없으면 규칙을 적용하지 않는다.
+create or replace function public._owner_key(p_owner text, p_contact text) returns text
+language sql immutable as $$
+    select coalesce(nullif(trim(coalesce(p_owner, '')), ''), nullif(trim(coalesce(p_contact, '')), ''))
+$$;
+
+create or replace function public._check_owner_rule(p_account bigint, p_pc bigint) returns void
+language plpgsql security definer set search_path = public as $$
+declare
+    v_key   text;
+    v_cnt   integer;
+    v_other bigint;
+begin
+    select _owner_key(owner, contact) into v_key from accounts where id = p_account;
+    if v_key is null then
+        return;
+    end if;
+    select count(*), min(s.pc_id) filter (where s.pc_id <> p_pc)
+      into v_cnt, v_other
+      from assignments s join accounts a on a.id = s.account_id
+     where a.id <> p_account and _owner_key(a.owner, a.contact) = v_key;
+    if v_cnt >= 2 then
+        raise exception '명의자 ''%''의 계정이 이미 %개 들어가 있어요. 같은 명의 계정은 최대 2개까지예요.', v_key, v_cnt;
+    end if;
+    if v_other is not null then
+        raise exception '명의자 ''%''의 계정이 이미 %번 컴퓨터에 있어요. 같은 명의 계정은 같은 컴퓨터에만 넣을 수 있어요.',
+            v_key, (select no from pcs where id = v_other);
+    end if;
+end $$;
+
 -- ============================================================ 배정
 create or replace function public.assign_account(p_pc bigint, p_slot integer, p_account bigint) returns void
 language plpgsql security definer set search_path = public as $$
@@ -374,6 +406,7 @@ begin
     if found then
         raise exception '이 계정은 이미 %에 들어 있어요.', _pc_label(v_where.pc_id, v_where.slot);
     end if;
+    perform _check_owner_rule(p_account, p_pc);
     begin
         insert into assignments (pc_id, slot, account_id) values (p_pc, p_slot, p_account);
     exception when unique_violation then
@@ -407,6 +440,7 @@ begin
     if not found then raise exception '이 계정은 어느 자리에도 없어요.'; end if;
     if not (owns_pc(v_src.pc_id) and owns_pc(p_pc)) then raise exception '담당 컴퓨터끼리만 옮길 수 있어요.'; end if;
     if not can_see_account(p_account) then raise exception '담당 계정이 아니에요.'; end if;
+    perform _check_owner_rule(p_account, p_pc);
     select * into v_pc from pcs where id = p_pc;
     if not found or p_slot < 1 or p_slot > v_pc.slot_count then raise exception '없는 자리예요.'; end if;
     begin
