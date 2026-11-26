@@ -1,7 +1,8 @@
 """기존 엑셀(작업장시트, IDPW)을 불러온다.
 
 규칙 (사용자와 합의):
-- IDPW의 '플래닛정지' 열은 실제로 메랜정지, '아르테일' 열은 실제로 플래닛정지, '1열'은 버린다.
+- IDPW의 '플래닛정지' 열(L)이 실제 플래닛정지 정보다. '아르테일' 열(M), '1열'(N)은 버린다.
+- 작업장시트의 '플래닛정지' 열(R)과 플래닛닉 칸의 '정지' 표시는 쓰지 않는다 (사용자 요청 2026-11-26).
 - IDPW 닉네임: H/I(닉네임/레벨직업(메랜))가 채워져 있으면 H/I=메랜, J/K=플래닛.
   H/I가 비어 있으면 J/K를 메랜으로 읽는다(예전 행의 쓰임새).
 - 같은 계정이 작업장시트에도 있으면 작업장시트 값이 최신이므로 그 값으로 덮어쓴다(빈 칸은 덮어쓰지 않음).
@@ -13,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from .models import PC, Account, Ban, Character, norm_login
+from .models import PC, Account, Ban, Character, norm_level_job, norm_login
 
 WORK_SHEET = "작업장시트"
 IDPW_SHEET = "IDPW"
@@ -112,7 +113,7 @@ def split_chars(game: str, nick, job) -> list[Character]:
         nk = nicks[i] if i < len(nicks) else ""
         jb = jobs[i] if i < len(jobs) else ""
         if nk or jb:
-            out.append(Character(game, nk, jb))
+            out.append(Character(game, nk, norm_level_job(jb)))
     return out
 
 
@@ -139,7 +140,7 @@ def read_idpw(ws, report: ImportReport) -> dict[tuple[str, str], Account]:
             acc.characters += split_chars("메랜", h, i) + split_chars("플래닛", j, k)
         else:
             acc.characters += split_chars("메랜", j, k)
-        for game, col in (("메랜", row[11]), ("플래닛", row[12])):
+        for game, col in (("플래닛", row[11]),):
             ban, extra = parse_ban(col)
             if ban:
                 setattr(acc, "mr_ban" if game == "메랜" else "pl_ban", ban)
@@ -231,13 +232,12 @@ def read_work(ws, accs: dict[tuple[str, str], Account], report: ImportReport):
         if mr_chars:
             acc.characters = [c for c in acc.characters if c.game != "메랜"] + mr_chars
         pl_nick = row[14]
-        if s(pl_nick) == "정지":
-            acc.pl_ban = Ban(True, acc.pl_ban.until if acc.pl_ban.banned else "")
+        if s(pl_nick) == "정지":  # 닉네임이 아니라 예전 정지 표시라서 버린다
             pl_nick = None
         pl_chars = split_chars("플래닛", pl_nick, row[15])
         if pl_chars:
             acc.characters = [c for c in acc.characters if c.game != "플래닛"] + pl_chars
-        for game, col in (("메랜", row[16]), ("플래닛", row[17])):
+        for game, col in (("메랜", row[16]),):
             ban, extra = parse_ban(col)
             attr = "mr_ban" if game == "메랜" else "pl_ban"
             if ban:

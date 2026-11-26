@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import Repository
-from ..models import STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login
-from .common import COLORS, button, copy_text, muted, page_header, run_safely
+from ..models import STATUS_AVAILABLE, STATUS_IN_USE, Account, norm_login
+from .common import T, button, copy_text, muted, page_header, px, run_safely, status_color
 from .dialogs import AccountDialog, CharacterDialog
 
 COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
@@ -22,9 +22,6 @@ COL_WORKER = 14
 CHAR_COLS = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
 WIDE_COLS = (7, 8, 9, 10, 15)
 FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심"]
-GREY = "#9AA0A8"
-RED = "#B42318"
-BLUE = "#1D4ED8"
 
 
 def ban_text(ban) -> str:
@@ -76,9 +73,9 @@ class AccountsTab(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
+        self.table.setShowGrid(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(36)
+        self.table.verticalHeader().setDefaultSectionSize(px(36))
         self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)  # 처음엔 상태순(사용중 → 사용가능 → 정지 → 탈퇴)
         self.table.setSortingEnabled(True)
         self.table.setWordWrap(False)
@@ -118,6 +115,10 @@ class AccountsTab(QWidget):
         lay.addLayout(frow)
         lay.addWidget(self.table, 1)
         lay.addLayout(brow)
+
+    def restyle(self) -> None:
+        self.table.verticalHeader().setDefaultSectionSize(px(36))
+        self._render()
 
     def refresh(self) -> None:
         self.accs = self.repo.list_accounts()
@@ -159,7 +160,7 @@ class AccountsTab(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for r, a in enumerate(rows):
-            status = "-" if a.withdrawn else ("● " + a.status)
+            status = "● 탈퇴" if a.withdrawn else ("● " + a.status)
             mr, pl = a.chars("메랜"), a.chars("플래닛")
 
             def nick(cs):
@@ -169,28 +170,28 @@ class AccountsTab(QWidget):
 
             vals = [status, a.owner, a.contact, a.provider, a.login_id,
                     a.password if self.show_pw else ("●" * 6 if a.password else ""), a.tag,
-                    nick(mr), mr[0].level_job if mr else "", nick(pl), pl[0].level_job if pl else "",
+                    nick(mr), mr[0].lj if mr else "", nick(pl), pl[0].lj if pl else "",
                     ban_text(a.mr_ban), ban_text(a.pl_ban),
                     a.location.text() if a.location else "",
                     self.worker_names.get(a.worker_id, "") if a.worker_id else "",
-                    ("[탈퇴] " if a.withdrawn else "") + a.note.replace("\n", " / ")]
+        a.note.replace("\n", " / ")]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, a.id)
                 color = None
-                if a.withdrawn:
-                    color = GREY
-                elif c == 0:
-                    color = COLORS[a.status][1]
+                if c == 0:
+                    color = status_color("탈퇴" if a.withdrawn else a.status)
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)
+                elif a.withdrawn:
+                    color = T("faint")
                 elif c in (11, 12) and v:
-                    color = RED
+                    color = T("danger")
                 elif c in CHAR_COLS:
                     cs = mr if CHAR_COLS[c] == "메랜" else pl
                     if len(cs) > 1:
-                        color = BLUE
+                        color = T("accent_text")
                     it.setToolTip("\n".join(("★ " if i == 0 else "   ") + ch.text() for i, ch in enumerate(cs))
                                   + ("\n\n눌러서 캐릭터 추가/수정/대표 변경" if cs else "눌러서 캐릭터 추가"))
                 if color:
@@ -201,7 +202,7 @@ class AccountsTab(QWidget):
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
         for c in WIDE_COLS:
-            self.table.setColumnWidth(c, min(self.table.columnWidth(c) + 8, 220))
+            self.table.setColumnWidth(c, min(self.table.columnWidth(c) + 8, px(220)))
         self.count_label.setText(f"{len(rows)}개 표시 · 캐릭터 칸을 누르면 캐릭터 창이 열려요")
 
     def _cell_clicked(self, r: int, c: int) -> None:

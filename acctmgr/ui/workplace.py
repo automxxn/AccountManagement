@@ -7,9 +7,9 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QMessageBox, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from ..models import PC, PROVIDERS, STATUS_AVAILABLE, STATUS_BANNED, Account
+from ..models import PC, PROVIDERS, Account
 from .common import (
-    ACCENT, COLORS, StatCard, badge, button, copy_text, label, muted, page_header, run_safely, vline,
+    StatCard, badge, button, copy_text, label, muted, page_header, px, run_safely, vline,
 )
 from .dialogs import AccountDialog, PcDialog
 
@@ -44,8 +44,7 @@ class SlotWidget(QFrame):
             row.addStretch(1)
             row.addWidget(label(str(slot), "slotNo"))
             text = "다른 담당자의 계정 사용 중" if hidden else "비어 있음 · 눌러서 계정 넣기"
-            t = muted(text)
-            t.setStyleSheet("font-size:13px;" + ("" if hidden else f"color:{ACCENT};"))
+            t = label(text, "slotLocked" if hidden else "slotHint")
             row.addWidget(t)
             row.addStretch(1)
             lay.addStretch(1)
@@ -68,8 +67,8 @@ class SlotWidget(QFrame):
         bottom = QHBoxLayout()
         bottom.setSpacing(4)
         chars = acc.main_char()
-        c = shrinkable(QLabel(chars or "캐릭터 없음"))
-        c.setStyleSheet("font-size:12px;" + ("" if chars else "color:#9AA0A8;"))
+        c = shrinkable(label(chars or "캐릭터 없음", "slotChars"))
+        c.setProperty("empty", not chars)
         c.setToolTip(chars)
         bottom.addWidget(c, 1)
         for lab in acc.ban_labels():
@@ -93,7 +92,7 @@ class PcRow(QFrame):
         lay.setSpacing(16)
 
         info = QWidget()
-        info.setFixedWidth(200)
+        info.setFixedWidth(px(200))
         il = QVBoxLayout(info)
         il.setContentsMargins(0, 0, 0, 0)
         il.setSpacing(3)
@@ -155,9 +154,9 @@ class WorkplaceTab(QWidget):
         stats = QHBoxLayout()
         stats.setSpacing(12)
         self.stat_pc = StatCard("컴퓨터")
-        self.stat_empty = StatCard("빈 자리", ACCENT)
-        self.stat_avail = StatCard("넣을 수 있는 계정", COLORS[STATUS_AVAILABLE][1])
-        self.stat_ban = StatCard("양쪽 게임 모두 정지", COLORS[STATUS_BANNED][1])
+        self.stat_empty = StatCard("빈 자리", "accent")
+        self.stat_avail = StatCard("넣을 수 있는 계정", "success")
+        self.stat_ban = StatCard("양쪽 게임 모두 정지", "danger")
         for s in (self.stat_pc, self.stat_empty, self.stat_avail, self.stat_ban):
             stats.addWidget(s)
         root.addLayout(stats)
@@ -191,7 +190,7 @@ class WorkplaceTab(QWidget):
         # 오른쪽: 자리 패널
         self.panel = QFrame()
         self.panel.setObjectName("panel")
-        self.panel.setFixedWidth(380)
+        self.panel.setFixedWidth(px(380))
         pl = QVBoxLayout(self.panel)
         pl.setContentsMargins(0, 0, 0, 0)
         pl.setSpacing(0)
@@ -229,6 +228,12 @@ class WorkplaceTab(QWidget):
         self._render_cards()
         self._render_panel()
 
+    def restyle(self) -> None:
+        """테마/배율이 바뀌었을 때 받아 둔 데이터로 다시 그린다 (서버 조회 없음)."""
+        self.panel.setFixedWidth(px(380))
+        self._render_cards()
+        self._render_panel()
+
     def _pc(self, pc_id: int) -> PC | None:
         return next((p for p in self.pcs if p.id == pc_id), None)
 
@@ -262,8 +267,8 @@ class WorkplaceTab(QWidget):
         if n == 0:
             empty = muted("조건에 맞는 컴퓨터가 없어요." if self.pcs else
                           "아직 컴퓨터가 없어요. 엑셀을 가져오거나 컴퓨터를 추가하세요.")
+            empty.setObjectName("emptyText")
             empty.setAlignment(Qt.AlignCenter)
-            empty.setStyleSheet("font-size:14px; padding:40px;")
             lay.addWidget(empty)
         lay.addStretch(1)
         self.scroll.setWidget(host)
@@ -293,7 +298,7 @@ class WorkplaceTab(QWidget):
                          "· 자리를 두 번 누르면 계정 수정 창이 열려요."):
                 t = QLabel(line)
                 t.setWordWrap(True)
-                t.setStyleSheet("color:#4B5563;")
+                t.setObjectName("help")
                 L.addWidget(t)
             L.addStretch(1)
             return
@@ -316,7 +321,7 @@ class WorkplaceTab(QWidget):
 
     def _field(self, grid: QGridLayout, row: int, name: str, value: str, copy: str | None = None) -> None:
         k = muted(name)
-        k.setFixedWidth(72)
+        k.setFixedWidth(px(72))
         v = QLabel(value or "-")
         v.setWordWrap(True)
         v.setTextInteractionFlags(Qt.TextSelectableByMouse)

@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..db import Repository, RepoError
-from ..models import GAMES, PC, PROVIDERS, Account, Ban, Character
-from .common import copy_text, muted
+from ..models import GAMES, PC, PROVIDERS, Account, Ban, Character, join_level_job, split_level_job
+from .common import T, copy_text, muted, px
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -64,28 +64,32 @@ class BanField(QWidget):
 
 
 class CharacterEditor(QWidget):
-    """한 게임의 캐릭터 목록 편집기. 맨 위 줄이 대표 캐릭터."""
+    """한 게임의 캐릭터 목록 편집기. 맨 위 줄이 대표 캐릭터. 레벨과 직업은 따로 입력한다."""
+
+    COLS = ["", "닉네임", "레벨", "직업"]
 
     def __init__(self, game: str, chars: list[Character], editable: bool = True, parent=None):
         super().__init__(parent)
         self.game = game
         self.editable = editable
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["", "닉네임", "레벨/직업"])
+        self.table = QTableWidget(0, len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
         hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.setColumnWidth(0, 56)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.setColumnWidth(0, px(56))
+        self.table.setColumnWidth(2, px(70))
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setShowGrid(False)
+        self.table.setShowGrid(True)
         if not editable:
             self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         for c in chars:
-            self._append(c.nickname, c.level_job)
+            self._append(c.nickname, c.level, c.job)
 
         head = QHBoxLayout()
         head.addWidget(section(f"{game} 캐릭터"))
@@ -117,33 +121,36 @@ class CharacterEditor(QWidget):
         lay.addLayout(btns)
         self._mark()
 
-    def _append(self, nick: str = "", job: str = "") -> int:
+    def _append(self, nick: str = "", level: str = "", job: str = "") -> int:
         r = self.table.rowCount()
         self.table.insertRow(r)
         mark = QTableWidgetItem("")
         mark.setFlags(mark.flags() & ~Qt.ItemIsEditable)
+        mark.setTextAlignment(Qt.AlignCenter)
         self.table.setItem(r, 0, mark)
         self.table.setItem(r, 1, QTableWidgetItem(nick))
-        self.table.setItem(r, 2, QTableWidgetItem(job))
+        lv = QTableWidgetItem(level)
+        lv.setTextAlignment(Qt.AlignCenter)
+        self.table.setItem(r, 2, lv)
+        self.table.setItem(r, 3, QTableWidgetItem(job))
         return r
 
     def _mark(self) -> None:
         for r in range(self.table.rowCount()):
             it = self.table.item(r, 0)
             it.setText("대표" if r == 0 else "")
-            it.setForeground(QColor("#1D4ED8"))
+            it.setForeground(QColor(T("accent_text")))
             f = it.font()
             f.setBold(True)
             it.setFont(f)
         n = self.table.rowCount()
         self.count.setText(f"{n}개" if n else "없음")
 
-    def _rows(self) -> list[tuple[str, str]]:
-        out = []
-        for r in range(self.table.rowCount()):
-            out.append(((self.table.item(r, 1) or QTableWidgetItem("")).text(),
-                        (self.table.item(r, 2) or QTableWidgetItem("")).text()))
-        return out
+    def _rows(self) -> list[tuple[str, str, str]]:
+        def t(r, c):
+            it = self.table.item(r, c)
+            return it.text() if it else ""
+        return [(t(r, 1), t(r, 2), t(r, 3)) for r in range(self.table.rowCount())]
 
     def _add(self) -> None:
         r = self._append()
@@ -157,9 +164,9 @@ class CharacterEditor(QWidget):
             return
         rows = self._rows()
         rows.insert(0, rows.pop(r))
-        for i, (n, j) in enumerate(rows):
-            self.table.item(i, 1).setText(n)
-            self.table.item(i, 2).setText(j)
+        for i, vals in enumerate(rows):
+            for c, v in enumerate(vals, start=1):
+                self.table.item(i, c).setText(v)
         self.table.setCurrentCell(0, 1)
         self._mark()
 
@@ -170,7 +177,17 @@ class CharacterEditor(QWidget):
             self._mark()
 
     def value(self) -> list[Character]:
-        return [Character(self.game, n.strip(), j.strip()) for n, j in self._rows() if n.strip() or j.strip()]
+        out = []
+        for nick, level, job in self._rows():
+            level = level.strip()
+            if level and not level.isdigit():
+                # 레벨 칸에 '104프리'처럼 섞어 적었으면 나눠서 저장
+                lv, jb = split_level_job(level)
+                level, job = lv, (jb + " " + job).strip()
+            lj = join_level_job(level, job)
+            if nick.strip() or lj:
+                out.append(Character(self.game, nick.strip(), lj))
+        return out
 
 
 class CharacterDialog(QDialog):
@@ -183,7 +200,7 @@ class CharacterDialog(QDialog):
         self.game = game
         can = repo.me.can("can_edit_account")
         self.setWindowTitle(f"{game} 캐릭터 — {acc.owner or acc.login_id}")
-        self.resize(560, 420)
+        self.resize(px(620), px(440))
         self.editor = CharacterEditor(game, self.acc.chars(game), can)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         box.button(QDialogButtonBox.Save).setText("저장")
@@ -278,7 +295,7 @@ class AccountDialog(QDialog):
         box.rejected.connect(self.reject)
         box.button(QDialogButtonBox.Save).setEnabled(self.can_save)
 
-        self.resize(1020, 660)
+        self.resize(px(1080), px(680))
         lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 20, 16)
         if not self.can_save:
@@ -289,7 +306,7 @@ class AccountDialog(QDialog):
         cols.setSpacing(24)
         left = QWidget()
         left.setLayout(form)
-        left.setFixedWidth(470)
+        left.setFixedWidth(px(470))
         cols.addWidget(left)
         right = QVBoxLayout()
         right.setSpacing(12)
@@ -342,7 +359,7 @@ class PcDialog(QDialog):
         p = self.pc
         self.can_save = repo.me.is_admin or (pc is not None and repo.me.can("can_edit_pc"))
         self.setWindowTitle(("컴퓨터 수정" if self.can_save else "컴퓨터 정보") if pc else "컴퓨터 추가")
-        self.resize(460, 440)
+        self.resize(px(460), px(460))
 
         form = QFormLayout()
         self.worker = worker_combo(repo, p.worker_id)

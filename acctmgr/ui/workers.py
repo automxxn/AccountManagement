@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import PERMS, ROLES, Profile
-from .common import button, muted, page_header, run_safely
+from .common import button, muted, page_header, px, run_safely
 from ..cloud import LOGIN_DOMAIN
 
 COLS = ["이름", "아이디", "역할"] + [label for _, label in PERMS] + [""]
@@ -41,12 +41,12 @@ class WorkersTab(QWidget):
                       "② 역할을 '근무자'로 바꾸고 권한을 체크한 뒤 저장하세요.\n"
                       "③ 컴퓨터/계정 수정 창의 '담당 근무자'에서 맡길 것을 정하세요. 근무자는 담당 컴퓨터와 담당 계정만 볼 수 있어요.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("background:#FFFFFF; border:1px solid #E4E6EA; border-radius:10px; padding:12px 14px; color:#3D4450;")
+        hint.setObjectName("hintBox")
         self.table = QTableWidget(0, len(COLS))
         self.table.setHorizontalHeaderLabels(COLS)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(44)
-        self.table.setShowGrid(False)
+        self.table.verticalHeader().setDefaultSectionSize(px(44))
+        self.table.setShowGrid(True)
         self.table.setSelectionMode(QAbstractItemView.NoSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
@@ -93,8 +93,12 @@ class WorkersTab(QWidget):
                 save = button("저장", "primary")
                 save.clicked.connect(lambda _=False, r=r, p=p, role=role, checks=checks: self._save(r, p, role, checks))
             self.table.setCellWidget(r, len(COLS) - 1, _padded(save))
+        self.restyle()
+
+    def restyle(self) -> None:
+        self.table.verticalHeader().setDefaultSectionSize(px(44))
         for c, w in enumerate([180, 160, 140] + [120] * len(PERMS) + [100]):
-            self.table.setColumnWidth(c, w)
+            self.table.setColumnWidth(c, px(w))
 
     def _save(self, r: int, p: Profile, role: QComboBox, checks: list[QCheckBox]) -> None:
         q = copy.copy(p)

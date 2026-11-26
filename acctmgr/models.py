@@ -1,6 +1,7 @@
 """데이터 모델과 상태 계산 규칙."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -36,15 +37,46 @@ class Ban:
         return f"{game}정지" + (f"~{self.until}" if self.until else "")
 
 
+_LEVEL_RE = re.compile(r"^\s*(\d+)\s*(.*?)\s*$")
+
+
+def split_level_job(text: str) -> tuple[str, str]:
+    """'104프리' → ('104', '프리'), '메렌육성용' → ('', '메렌육성용')"""
+    m = _LEVEL_RE.match(text or "")
+    return (m.group(1), m.group(2)) if m else ("", (text or "").strip())
+
+
+def join_level_job(level: str, job: str) -> str:
+    """('104', '프리') → '104 프리' (레벨과 직업 사이 띄어쓰기)"""
+    return " ".join(x for x in ((level or "").strip(), (job or "").strip()) if x)
+
+
+def norm_level_job(text: str) -> str:
+    return join_level_job(*split_level_job(text))
+
+
 @dataclass
 class Character:
     game: str
     nickname: str = ""
-    level_job: str = ""
+    level_job: str = ""  # 저장 형식: '104 프리'
     id: int | None = None
 
+    @property
+    def level(self) -> str:
+        return split_level_job(self.level_job)[0]
+
+    @property
+    def job(self) -> str:
+        return split_level_job(self.level_job)[1]
+
+    @property
+    def lj(self) -> str:
+        """화면 표시용 레벨/직업 ('104 프리')"""
+        return norm_level_job(self.level_job)
+
     def text(self) -> str:
-        return f"{self.nickname} {self.level_job}".strip()
+        return f"{self.nickname} {self.lj}".strip()
 
 
 @dataclass

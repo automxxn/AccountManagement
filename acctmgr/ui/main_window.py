@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
+    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QStackedWidget, QTableWidget,
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
@@ -14,7 +14,9 @@ from ..importer import import_workbook, snapshot
 from ..models import ROLES
 from ..version import __version__
 from .accounts import AccountsTab
-from .common import button, label, muted, page, page_header
+from .common import (
+    ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, theme,
+)
 from .connect import ConnectionDialog, settings
 from .update_ui import manual_check
 from .workers import WorkersTab
@@ -37,12 +39,16 @@ class HistoryTab(QWidget):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
+        self.table.setShowGrid(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(px(34))
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         lay.addWidget(self.table, 1)
+
+    def restyle(self) -> None:
+        self.table.verticalHeader().setDefaultSectionSize(px(34))
+        self.table.resizeColumnsToContents()
 
     def refresh(self) -> None:
         rows = self.repo.list_log()
@@ -87,6 +93,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self._sidebar())
         h.addWidget(self.stack, 1)
         self.setCentralWidget(central)
+        QApplication.instance().installEventFilter(self)  # Ctrl + 마우스 휠로 배율 조절
 
         self._last_change = None
         self.refresh_all()
@@ -99,9 +106,9 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- 사이드바
     def _sidebar(self) -> QFrame:
-        side = QFrame()
+        side = self.side = QFrame()
         side.setObjectName("sidebar")
-        side.setFixedWidth(220)
+        side.setFixedWidth(px(220))
         lay = QVBoxLayout(side)
         lay.setContentsMargins(14, 20, 14, 14)
         lay.setSpacing(6)
@@ -114,11 +121,39 @@ class MainWindow(QMainWindow):
         self.nav.setCursor(Qt.PointingHandCursor)
         for name, _ in self.pages:
             it = QListWidgetItem(name)
-            it.setSizeHint(QSize(0, 40))
+            it.setSizeHint(QSize(0, px(40)))
             self.nav.addItem(it)
         self.nav.setCurrentRow(0)
         self.nav.currentRowChanged.connect(self._go)
         lay.addWidget(self.nav, 1)
+
+        # 보기 설정: 다크 모드 스위치, 화면 배율
+        pref = QFrame()
+        pref.setObjectName("prefBox")
+        pl = QVBoxLayout(pref)
+        pl.setContentsMargins(12, 10, 12, 10)
+        pl.setSpacing(8)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("다크 모드"))
+        row.addStretch(1)
+        self.dark = ToggleSwitch(theme() == "dark")
+        self.dark.setToolTip("밝은 화면 / 어두운 화면 전환")
+        self.dark.toggled.connect(lambda on: self.set_appearance(theme_name="dark" if on else "light"))
+        row.addWidget(self.dark)
+        pl.addLayout(row)
+        zh = QHBoxLayout()
+        zh.addWidget(QLabel("화면 배율"))
+        zh.addStretch(1)
+        zh.addWidget(label("Ctrl + 휠", "faint"))
+        pl.addLayout(zh)
+        zr = QHBoxLayout()
+        zr.setSpacing(4)
+        zr.addWidget(button("-", "zoom", lambda: self.set_appearance(zoom=scale() - ZOOM_STEP), "작게 (Ctrl + 휠 아래)"))
+        self.zoom_btn = button(f"{round(scale() * 100)}%", "zoom", lambda: self.set_appearance(zoom=1.0), "누르면 100%로")
+        zr.addWidget(self.zoom_btn, 1)
+        zr.addWidget(button("+", "zoom", lambda: self.set_appearance(zoom=scale() + ZOOM_STEP), "크게 (Ctrl + 휠 위)"))
+        pl.addLayout(zr)
+        lay.addWidget(pref)
 
         lay.addWidget(button("새로고침  (F5)", "", self.refresh_all))
         act = QAction(self)
@@ -140,11 +175,36 @@ class MainWindow(QMainWindow):
         more.setPopupMode(QToolButton.InstantPopup)
         more.setMenu(self._menu())
         more.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        more.setMinimumWidth(170)
+        more.setMinimumWidth(px(170))
         ul.addSpacing(6)
         ul.addWidget(more)
         lay.addWidget(user)
         return side
+
+    # ---------------------------------------------------------------- 보기 설정
+    def set_appearance(self, theme_name: str | None = None, zoom: float | None = None) -> None:
+        apply_appearance(theme_name, zoom)
+        s = settings()
+        s.setValue("theme", theme())
+        s.setValue("zoom", scale())
+        self.zoom_btn.setText(f"{round(scale() * 100)}%")
+        self.side.setFixedWidth(px(220))
+        for i in range(self.nav.count()):
+            self.nav.item(i).setSizeHint(QSize(0, px(40)))
+        self.dark.updateGeometry()
+        self.dark.update()
+        for _, t in self.pages:
+            t.restyle()
+
+    def eventFilter(self, obj, ev) -> bool:
+        # 앱 전체 이벤트가 지나가므로 휠 이벤트만 보고 나머지는 그대로 통과시킨다
+        if ev.type() != QEvent.Wheel or not (ev.modifiers() & Qt.ControlModifier):
+            return False
+        if not self.isActiveWindow():
+            return False
+        step = ZOOM_STEP if ev.angleDelta().y() > 0 else -ZOOM_STEP
+        self.set_appearance(zoom=scale() + step)
+        return True
 
     def _menu(self) -> QMenu:
         m = QMenu(self)
