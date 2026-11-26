@@ -4,10 +4,10 @@ from __future__ import annotations
 import copy
 import html
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -22,7 +22,11 @@ from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetN
 
 PC_FILTERS = ["모든 컴퓨터", "빈 자리가 있는 컴퓨터", "정지 계정이 있는 컴퓨터"]
 MIN_SLOTS = 2  # 컴퓨터마다 기본 자리 수 (이 밑으로는 줄일 수 없음)
-PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "리모트T", "컴퓨터 담당", "자리"]
+PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "AnyDesk 암호", "컴퓨터 담당", "자리"]
+EDIT_COLS = {1: "name", 2: "ld_cloud", 3: "anydesk_id", 4: "anydesk_pw"}  # 더블클릭으로 바로 수정, Ctrl+C/V
+REAL_ROLE = Qt.UserRole + 2         # 가려진 칸(암호)의 실제 값
+GAP_ROLE = Qt.UserRole + 3          # 컴퓨터 사이 간격 줄
+GROUP_START_ROLE = Qt.UserRole + 4  # 컴퓨터 칸의 첫 줄 (위쪽 테두리)
 PC_WORKER_COL = 5
 OFF = len(PC_COLUMNS)  # 계정 열이 시작하는 위치
 
@@ -50,6 +54,35 @@ def char_line(acc: Account, compact: bool = False) -> str:
         elif not compact:
             parts.append(f"{game}: 없음")
     return "   ·   ".join(parts) if parts else "캐릭터 없음"
+
+
+class SheetDelegate(GridDelegate):
+    """작업장 시트 칸 그리기 + 바로 수정.
+    - 간격 줄은 바탕색만 칠해서 컴퓨터마다 따로 떨어진 칸처럼 보이게 한다
+    - 컴퓨터 칸의 첫 줄에는 위쪽 테두리를 그린다
+    - 수정할 때는 가려진 값(암호)이 아니라 실제 값을 보여주고, 끝나면 on_commit으로 저장한다
+    """
+
+    def __init__(self, parent, on_commit):
+        super().__init__(parent)
+        self.on_commit = on_commit
+
+    def paint(self, painter, option, index) -> None:
+        if index.data(GAP_ROLE):
+            painter.fillRect(option.rect, QColor(T("gap")))
+            return
+        super().paint(painter, option, index)
+        if index.data(GROUP_START_ROLE):
+            r = option.rect
+            painter.fillRect(r.left(), r.top(), r.width(), 2, QColor(T("group_line")))
+
+    def setEditorData(self, editor, index) -> None:
+        real = index.data(REAL_ROLE)
+        editor.setText(real if real is not None else (index.data() or ""))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index) -> None:
+        self.on_commit(index.row(), index.column(), editor.text())
 
 
 class WorkplaceTab(QWidget):
@@ -111,8 +144,10 @@ class WorkplaceTab(QWidget):
         self.table.setHorizontalHeaderLabels(PC_COLUMNS + ACCOUNT_COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         style_table(self.table)
+        self.table.setItemDelegate(SheetDelegate(self.table, self._commit_pc_cell))
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
+        self.table.installEventFilter(self)  # Ctrl+C / Ctrl+V
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(False)
         hh = self.table.horizontalHeader()
@@ -122,12 +157,11 @@ class WorkplaceTab(QWidget):
         self.table.setColumnHidden(PC_WORKER_COL, not self.show_worker)
         self.table.setColumnHidden(OFF + ACC_WORKER, not self.show_worker)
         self.table.cellClicked.connect(self._cell_clicked)
-        self.table.cellDoubleClicked.connect(
-            lambda r, c: self.open_slot(*self._row_map[r]) if r < len(self._row_map) else None)
+        self.table.cellDoubleClicked.connect(self._cell_double_clicked)
         self.table.setMouseTracking(True)
         self.table.cellEntered.connect(lambda r, c: None if self.nav.drag else self.table.viewport().setCursor(
             Qt.PointingHandCursor if (c - OFF) in ACC_CHAR else Qt.ArrowCursor))
-        self._row_map: list[tuple[int, int]] = []
+        self._row_map: list[tuple[int, int] | None] = []  # 줄 → (컴퓨터 id, 자리), 간격 줄은 None
         self.nav = SheetNav(self.table, "work_table_zoom", self._render_cards)
         left.addWidget(self.table, 1)
         foot = QHBoxLayout()
@@ -221,27 +255,46 @@ class WorkplaceTab(QWidget):
         pcs = self._visible_pcs()
         t.clearSpans()
         t.clearContents()
-        t.setRowCount(sum(len(pc.slots) for pc in pcs))
+        t.setRowCount(sum(len(pc.slots) for pc in pcs) + max(0, len(pcs) - 1))
         bold = self.nav.bold_font()
         show_pw = self.pw_btn.isChecked()
+        can_edit = self._can_edit_pc()
+        ncols = t.columnCount()
+        row_h = px(36 * self.nav.zoom)
         self._row_map = []
         r = 0
         sel_row = -1
-        for pc in pcs:
+        for k, pc in enumerate(pcs):
+            if k > 0:  # 컴퓨터 사이 간격 줄
+                gap = QTableWidgetItem("")
+                gap.setFlags(Qt.NoItemFlags)
+                gap.setData(GAP_ROLE, True)
+                t.setItem(r, 0, gap)
+                t.setSpan(r, 0, 1, ncols)
+                t.setRowHeight(r, px(14))
+                self._row_map.append(None)
+                r += 1
             start = r
             n = len(pc.slots)
             for i, aid in enumerate(pc.slots, start=1):
                 self._row_map.append((pc.id, i))
+                t.setRowHeight(r, row_h)
                 if self.selected == (pc.id, i):
                     sel_row = r
-                end = {GROUP_END_ROLE: i == n}
+                end = {GROUP_END_ROLE: i == n, GROUP_START_ROLE: i == 1}
                 if i == 1:
                     worker = ((self.worker_names.get(pc.worker_id, "?") if pc.worker_id else "없음")
                               if self.show_worker else "")
-                    for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pc.remote_t, worker]):
+                    pw = pc.anydesk_pw if show_pw else ("●" * 6 if pc.anydesk_pw else "")
+                    for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pw, worker]):
                         it = QTableWidgetItem(v)
                         it.setTextAlignment(Qt.AlignCenter)
-                        it.setData(GROUP_END_ROLE, True)  # 합친 칸의 아래가 컴퓨터 경계
+                        it.setData(GROUP_END_ROLE, True)    # 합친 칸의 아래가 컴퓨터 경계
+                        it.setData(GROUP_START_ROLE, True)  # 위쪽 테두리
+                        if c in EDIT_COLS:
+                            it.setData(REAL_ROLE, getattr(pc, EDIT_COLS[c]))
+                            it.setToolTip("더블클릭해서 바로 수정 · Ctrl+C 복사 · Ctrl+V 붙여넣기" if can_edit
+                                          else "Ctrl+C 복사")
                         if c == 0:
                             it.setFont(bold)
                             it.setForeground(QColor(T("accent_text")))
@@ -249,6 +302,7 @@ class WorkplaceTab(QWidget):
                 slot_it = QTableWidgetItem(str(i))
                 slot_it.setTextAlignment(Qt.AlignCenter)
                 slot_it.setData(GROUP_END_ROLE, i == n)
+                slot_it.setData(GROUP_START_ROLE, i == 1)
                 t.setItem(r, OFF - 1, slot_it)
                 acc = self.accs.get(aid) if aid else None
                 if acc:
@@ -257,8 +311,14 @@ class WorkplaceTab(QWidget):
                     it = QTableWidgetItem("다른 담당자의 계정 사용 중" if aid else "비어 있음  ·  눌러서 계정 넣기")
                     it.setForeground(QColor(T("muted") if aid else T("accent_text")))
                     it.setData(GROUP_END_ROLE, i == n)
+                    it.setData(GROUP_START_ROLE, i == 1)
                     t.setItem(r, OFF, it)
                     t.setSpan(r, OFF, 1, len(ACCOUNT_COLUMNS))
+                # 바로 수정은 컴퓨터 정보 칸(EDIT_COLS)만
+                for c in range(ncols):
+                    it = t.item(r, c)
+                    if it and not (can_edit and i == 1 and c in EDIT_COLS):
+                        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 r += 1
             if n > 1:
                 for c in range(OFF - 1):
@@ -268,7 +328,8 @@ class WorkplaceTab(QWidget):
         fm = QFontMetrics(bold)
         pad = px(GridDelegate.PAD) * 2 + px(10)
         for c in range(OFF):
-            texts = [PC_COLUMNS[c]] + [t.item(row, c).text() for row in range(t.rowCount()) if t.item(row, c)]
+            texts = [PC_COLUMNS[c]] + [t.item(row, c).text() for row in range(t.rowCount())
+                                       if t.item(row, c) and self._row_map[row]]
             t.setColumnWidth(c, max(fm.horizontalAdvance(x) for x in texts) + pad)
         if sel_row >= 0:
             t.selectRow(sel_row)
@@ -285,7 +346,7 @@ class WorkplaceTab(QWidget):
                                      "아직 컴퓨터가 없어요. 엑셀을 가져오거나 컴퓨터를 추가하세요.")
 
     def _cell_clicked(self, r: int, c: int) -> None:
-        if r >= len(self._row_map):
+        if r >= len(self._row_map) or not self._row_map[r]:
             return
         pc_id, slot = self._row_map[r]
         pc = self._pc(pc_id)
@@ -295,6 +356,51 @@ class WorkplaceTab(QWidget):
                 self._after_change()
             return
         self.select_slot(pc_id, slot)
+
+    def _can_edit_pc(self) -> bool:
+        return self.repo.me.is_admin or self.repo.me.can("can_edit_pc")
+
+    def _cell_double_clicked(self, r: int, c: int) -> None:
+        if r >= len(self._row_map) or not self._row_map[r]:
+            return
+        if c in EDIT_COLS and self._can_edit_pc():
+            return  # 칸 안에서 바로 수정 (편집창이 열림)
+        self.open_slot(*self._row_map[r])
+
+    def _commit_pc_cell(self, row: int, col: int, text: str) -> None:
+        """바로 수정/붙여넣기 결과를 저장한다. 표를 다시 그리므로 편집이 끝난 뒤에 실행한다."""
+        if col not in EDIT_COLS or row >= len(self._row_map) or not self._row_map[row]:
+            return
+        pc_id, field = self._row_map[row][0], EDIT_COLS[col]
+        QTimer.singleShot(0, lambda: self._save_pc_field(pc_id, field, text))
+
+    def _save_pc_field(self, pc_id: int, field: str, value: str) -> None:
+        pc = self._pc(pc_id)
+        value = value.strip() if field != "anydesk_pw" else value
+        if not pc or getattr(pc, field) == value:
+            return
+        q = copy.deepcopy(pc)
+        setattr(q, field, value)
+        if run_safely(self, self.repo.save_pc, q):
+            self._after_change()
+        else:
+            self.refresh()
+
+    def eventFilter(self, obj, ev) -> bool:
+        if obj is self.table and ev.type() == QEvent.KeyPress:
+            idx = self.table.currentIndex()
+            if not idx.isValid():
+                return False
+            if ev.matches(QKeySequence.Copy):
+                real = idx.data(REAL_ROLE)
+                copy_text(real if real is not None else (idx.data() or ""))
+                return True
+            if ev.matches(QKeySequence.Paste):
+                if idx.column() in EDIT_COLS and self._can_edit_pc():
+                    text = (QApplication.clipboard().text() or "").splitlines()
+                    self._commit_pc_cell(idx.row(), idx.column(), text[0] if text else "")
+                return True
+        return False
 
     # ---------------------------------------------------------------- 패널
     def _clear_panel(self) -> None:
