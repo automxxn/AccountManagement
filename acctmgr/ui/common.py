@@ -98,6 +98,12 @@ def _chevron_icon(color: str) -> str:
                  'stroke-linecap="round" stroke-linejoin="round"/></svg>')
 
 
+def _chevron_up_icon(color: str) -> str:
+    return _icon("chevron_up_" + color.strip("#"), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                 f'<path d="M4 10l4-4 4 4" fill="none" stroke="{color}" stroke-width="1.8" '
+                 'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
 def _calendar_icon(color: str) -> str:
     return _icon("calendar_" + color.strip("#"), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
                  f'<rect x="2" y="3" width="12" height="11" rx="2" fill="none" stroke="{color}" stroke-width="1.5"/>'
@@ -111,6 +117,7 @@ def build_style() -> str:
     p = px
     check = _check_icon()
     chevron = _chevron_icon(c["muted"])
+    chevron_up = _chevron_up_icon(c["muted"])
     calendar = _calendar_icon(c["muted"])
     return f"""
 QWidget {{ font-family: "Malgun Gothic"; font-size: {p(13)}px; color: {c['ink']}; }}
@@ -161,6 +168,15 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateTimeEdit:focus, QPlainTex
 QLineEdit:disabled, QDateTimeEdit:disabled {{ background: {c['surface2']}; color: {c['faint']}; }}
 QComboBox::drop-down, QDateTimeEdit::drop-down {{ border: none; width: {p(26)}px; }}
 QComboBox::down-arrow {{ image: url({chevron}); width: {p(12)}px; height: {p(12)}px; }}
+QSpinBox {{ padding: {p(2)}px {p(6)}px; padding-right: {p(26)}px; min-height: {p(30)}px; }}
+QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: {p(24)}px; border: none;
+    border-left: 1px solid {c['input_border']}; background: transparent; }}
+QSpinBox::up-button {{ subcontrol-position: top right; border-top-right-radius: 7px; }}
+QSpinBox::down-button {{ subcontrol-position: bottom right; border-bottom-right-radius: 7px;
+    border-top: 1px solid {c['input_border']}; }}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {c['hover']}; }}
+QSpinBox::up-arrow {{ image: url({chevron_up}); width: {p(10)}px; height: {p(10)}px; }}
+QSpinBox::down-arrow {{ image: url({chevron}); width: {p(10)}px; height: {p(10)}px; }}
 QDateTimeEdit::down-arrow {{ image: url({calendar}); width: {p(16)}px; height: {p(16)}px; }}
 QDateTimeEdit::down-arrow:disabled {{ image: none; }}
 QCalendarWidget QWidget#qt_calendar_navigationbar {{ background: {c['surface2']}; }}

@@ -8,7 +8,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QHeaderView,
     QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
@@ -23,8 +24,6 @@ REFRESH_MS = 4000
 # 실행기 설정 항목 (키, 이름, 기본값)
 CHECKS = [
     ("reopen", "재시작 후 기다렸다가 다시 열기", True),
-    ("restart_before_a", "A 로그인 전에 먼저 재시작", False),
-    ("restart_before_b", "B 로그인 전에 먼저 재시작", False),
     ("minimize_ld", "작업이 끝나면 LD CLOUD 창 최소화", True),
     ("autostart_open", "윈도우 켜질 때 자동으로 클라우드 열기", True),
 ]
@@ -60,7 +59,7 @@ class AgentSettingsDialog(QDialog):
         self.repo, self.pc, self.agent = repo, pc, agent
         self.unlinked = False
         self.setWindowTitle(f"실행기 설정 - {pc.no}. {pc.name}")
-        self.resize(px(520), px(520))
+        self.resize(px(620), px(640))
         cur = dict((agent.state.get("cfg") if agent else None) or {})  # PC에 지금 저장된 값
         cur.update(pc.agent_settings or {})                              # 여기서 정한 값이 우선
         self.cloud = QComboBox()
@@ -73,20 +72,45 @@ class AgentSettingsDialog(QDialog):
         self.cloud.lineEdit().setPlaceholderText("LD CLOUD 기기 (이름 #ID)")
         self.wait = QSpinBox()
         self.wait.setRange(10, 1800)
+        self.wait.setSingleStep(1)  # 화살표/휠 한 번에 1초
         self.wait.setSuffix(" 초")
-        self.wait.setButtonSymbols(QSpinBox.NoButtons)
-        self.wait.setValue(int(cur.get("restart_wait", 180) or 180))
+        self.wait.setMinimumWidth(px(130))
+        self.wait.setValue(int((pc.agent_settings or {}).get("restart_wait") or 120))  # 처음엔 120초
         self.checks = {}
         form = QFormLayout()
-        form.addRow("열 클라우드", self.cloud)
+        crow = QHBoxLayout()
+        crow.addWidget(self.cloud, 1)
+        crow.addWidget(self._cmd_btn("목록 다시 읽기", "reload_devices", "그 PC의 실행기가 LD CLOUD 기기 목록을 다시 읽어요"))
+        form.addRow("열 클라우드", crow)
         if pc.ld_cloud:
             form.addRow("", muted(f"작업장의 LD클라우드 칸: {pc.ld_cloud}"))
-        form.addRow("재시작 대기", self.wait)
+        wrow = QHBoxLayout()
+        wrow.addWidget(self.wait)
+        wrow.addWidget(muted("재시작한 뒤 다시 열 때까지 기다리는 시간"))
+        wrow.addStretch(1)
+        form.addRow("재시작 대기", wrow)
         for key, label, default in CHECKS:
             cb = QCheckBox(label)
             cb.setChecked(bool(cur.get(key, default)))
             self.checks[key] = cb
             form.addRow("", cb)
+        # 로그인 전에 먼저 재시작 (A/B 한 묶음 + 전체 선택)
+        group = QGroupBox("로그인 전에 먼저 재시작")
+        gl = QHBoxLayout(group)
+        self.before_all = QCheckBox("전체")
+        self.before_all.setTristate(False)
+        gl.addWidget(self.before_all)
+        gl.addSpacing(px(12))
+        for key, label in (("restart_before_a", "A 로그인"), ("restart_before_b", "B 로그인")):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(cur.get(key, False)))
+            cb.toggled.connect(self._sync_all)
+            self.checks[key] = cb
+            gl.addWidget(cb)
+        gl.addStretch(1)
+        self.before_all.clicked.connect(self._set_all)
+        self._sync_all()
+        form.addRow("", group)
         self.hk_on = QCheckBox("단축키 사용 (PC에서 직접 누를 때)")
         self.hk_on.setChecked(bool(cur.get("hotkeys_on", False)))
         form.addRow("", self.hk_on)
@@ -96,12 +120,28 @@ class AgentSettingsDialog(QDialog):
             e.setPlaceholderText("예: Ctrl+Alt+F1")
             self.hk[key] = e
             form.addRow(label, e)
+        # 그 PC의 프로그램 위치 (실행기가 알려 준 값)
+        ld = cur.get("ld_path", "")
+        lrow = QHBoxLayout()
+        lrow.addWidget(self._path_label(ld, "아직 못 찾음"), 1)
+        lrow.addWidget(self._cmd_btn("자동으로 찾기", "find_ld", "그 PC에서 LD CLOUD 설치 위치를 다시 찾아요"))
+        form.addRow("LD CLOUD 위치", lrow)
+        for key in ("AMP", "MAP"):
+            low = key.lower()
+            row = QHBoxLayout()
+            row.addWidget(self._path_label(cur.get(low + "_path", ""), "아직 없음 (한 번 실행하면 저장됨)"), 1)
+            row.addWidget(self._cmd_btn("폴더 열기", low + "_folder", "그 PC 화면에 폴더(탐색기)를 띄워요"))
+            row.addWidget(self._cmd_btn("지우기", low + "_clear", "지우면 다음 실행 때 그 PC에서 다시 찾아요"))
+            form.addRow(f"{key} 위치", row)
+        self.cmd_msg = muted("")
+
         lay = QVBoxLayout(self)
         if agent is None:
             lay.addWidget(muted("이 컴퓨터에 연결된 실행기가 아직 없어요. 설정은 저장해 두면 연결될 때 적용돼요."))
         else:
             lay.addWidget(muted(f"실행기: {agent.machine} · v{agent.version} · {_ago(agent.seconds_ago)}"))
         lay.addLayout(form)
+        lay.addWidget(self.cmd_msg)
         lay.addStretch(1)
         row = QHBoxLayout()
         if agent is not None and repo.me.is_admin:
@@ -114,6 +154,41 @@ class AgentSettingsDialog(QDialog):
         box.rejected.connect(self.reject)
         row.addWidget(box)
         lay.addLayout(row)
+
+    def _path_label(self, path: str, empty: str) -> QLabel:
+        lab = QLabel(path or empty)
+        lab.setToolTip(path)
+        lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lab.setMinimumWidth(px(200))
+        if not path:
+            lab.setStyleSheet(f"color:{T('muted')};")
+        return lab
+
+    def _cmd_btn(self, text: str, kind: str, tip: str):
+        b = button(text, "", lambda: self._send(kind), tip)
+        b.setEnabled(self.agent is not None)
+        return b
+
+    def _send(self, kind: str) -> None:
+        if run_safely(self, self.repo.send_command, self.pc.id, kind):
+            self.cmd_msg.setText(f"[{AGENT_KINDS[kind]}] 명령을 보냈어요. 결과는 PC 조종 화면의 명령 기록에 나와요 "
+                                 "(위치 값은 몇 초 뒤 이 창을 다시 열면 바뀌어요).")
+
+    def _before(self) -> list:
+        return [self.checks["restart_before_a"], self.checks["restart_before_b"]]
+
+    def _sync_all(self, *_):
+        """A/B가 둘 다 켜졌으면 '전체'도 켜짐, 하나라도 꺼지면 꺼짐."""
+        self.before_all.blockSignals(True)
+        self.before_all.setChecked(all(cb.isChecked() for cb in self._before()))
+        self.before_all.blockSignals(False)
+
+    def _set_all(self, on: bool) -> None:
+        for cb in self._before():
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        self._sync_all()
 
     def value(self) -> dict:
         v = {"cloud": self.cloud.currentText().strip(), "restart_wait": self.wait.value(),
@@ -170,6 +245,16 @@ class AgentsTab(QWidget):
                                  lambda _=False, k=kind: self._send_checked(k)))
         bar.addWidget(button("중지", "danger", lambda: self._send_checked("stop"), "하던 작업을 멈추고 기다리는 명령을 취소해요"))
         bar.addStretch(1)
+        bar2 = QHBoxLayout()
+        bar2.addSpacing(px(4))
+        bar2.addWidget(muted("다른 프로그램:"))
+        for kind in ("amp_run", "amp_stop", "map_run", "map_stop"):
+            bar2.addWidget(button(AGENT_KINDS[kind], "", lambda _=False, k=kind: self._send_checked(k)))
+        bar2.addSpacing(px(16))
+        bar2.addWidget(muted("실행기:"))
+        bar2.addWidget(button("실행기 다시 켜기", "", lambda: self._send_checked("restart_agent"),
+                              "실행기를 껐다가 다시 켜요. 새 버전이 있으면 이때 업데이트돼요"))
+        bar2.addStretch(1)
 
         self.table = QTableWidget(0, len(COLS))
         self.table.setHorizontalHeaderLabels(COLS)
@@ -231,6 +316,7 @@ class AgentsTab(QWidget):
                                   [button("새로고침", "", self.refresh)]))
         lay.addWidget(hint)
         lay.addLayout(bar)
+        lay.addLayout(bar2)
         lay.addWidget(split, 1)
         lay.addWidget(self.pending_box)
 

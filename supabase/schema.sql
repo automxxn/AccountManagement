@@ -1038,7 +1038,9 @@ create table if not exists public.pc_creds (
 create table if not exists public.pc_commands (
     id           bigint generated always as identity primary key,
     pc_id        bigint not null references public.pcs(id) on delete cascade,
-    kind         text not null check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop')),
+    kind         text not null check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop',
+                                        'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
+                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent')),
     status       text not null default 'queued' check (status in ('queued', 'running', 'done', 'failed', 'cancelled')),
     result       text not null default '',
     log          text not null default '',
@@ -1049,6 +1051,11 @@ create table if not exists public.pc_commands (
     finished_at  timestamptz
 );
 create index if not exists pc_commands_pc_idx on public.pc_commands(pc_id, id);
+-- 명령 종류가 늘어나면 제한을 다시 건다
+alter table public.pc_commands drop constraint if exists pc_commands_kind_check;
+alter table public.pc_commands add constraint pc_commands_kind_check check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop',
+                                        'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
+                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent'));
 
 -- 이 실행기(로그인한 agent)가 연결된 컴퓨터
 create or replace function public._my_agent_pc() returns bigint
