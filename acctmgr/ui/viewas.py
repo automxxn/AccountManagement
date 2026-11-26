@@ -16,7 +16,7 @@ WRITES = {
     "save_account", "delete_account", "approve_delete", "reject_delete", "save_pc", "delete_pc", "assign", "unassign",
     "move", "save_profile", "save_games", "bulk_import", "link_agent", "forget_agent", "send_command",
     "set_agent_settings", "set_agent_team", "swap_pc_numbers", "create_team", "rename_team", "delete_team",
-    "new_join_code", "create_team_key", "set_pc_mac",
+    "new_join_code", "create_team_key", "set_pc_mac", "request_agent_restart",
 }
 
 

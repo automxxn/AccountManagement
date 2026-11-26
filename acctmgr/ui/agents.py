@@ -692,8 +692,14 @@ class AgentsTab(QWidget):
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
         ph = QHBoxLayout()
-        ph.addWidget(QLabel("<b>연결 대기 실행기</b> — 어느 컴퓨터인지 골라 [연결]을 누르면 그 PC의 MAC이 그 컴퓨터에 고정돼요."))
+        self.pend_title = QLabel("<b>연결 대기 실행기</b>")
+        ph.addWidget(self.pend_title)
+        ph.addWidget(QLabel("— 어느 컴퓨터인지 골라 [연결]을 누르면 그 PC의 MAC이 그 컴퓨터에 고정돼요."))
         ph.addStretch(1)
+        self.update_old_btn = button("예전 실행기 모두 업데이트", "primary", self._update_old,
+                                     "MAC 모름으로 나오는(예전 버전) 연결 대기 실행기를 다시 켜서 새 버전으로 바꿔요. "
+                                     "새 버전이 되면 MAC이 보여요")
+        ph.addWidget(self.update_old_btn)
         self.show_linked = QCheckBox("연결된 실행기도 같이 보기 (어디에 붙어 있는지 확인·옮기기)")
         self.show_linked.toggled.connect(lambda _on: self._redraw_pending())
         ph.addWidget(self.show_linked)
@@ -1101,7 +1107,8 @@ class AgentsTab(QWidget):
             self._pending_key = None
             return
         taken = set(self.agents)
-        key = (tuple((a.user_id, a.pc_id) for a in self.pending), tuple((p.id, p.mac) for p in self.pcs), tuple(sorted(taken)))
+        # MAC·버전이 바뀌어도(예전 실행기가 업데이트되면) 줄을 다시 그린다
+        key = (tuple((a.user_id, a.pc_id, a.mac, a.version) for a in self.pending), tuple((p.id, p.mac) for p in self.pcs), tuple(sorted(taken)))
         if key != self._pending_key and self._picking():
             # 컴퓨터를 고르는 중(목록이 열려 있거나 그 칸을 누른 상태)이면 다 고를 때까지 새로 만들지 않는다
             return
@@ -1111,6 +1118,10 @@ class AgentsTab(QWidget):
                 self.pend.setItem(r, 3, _item(_ago(ag.seconds_ago)))
             return
         self._pending_key = key
+        waiting = [a for a in self.pending if a.pc_id is None]
+        old = [a for a in waiting if not a.mac]
+        self.pend_title.setText(f"<b>연결 대기 실행기 {len(waiting)}개</b>" + (f" (예전 버전 {len(old)}개)" if old else ""))
+        self.update_old_btn.setVisible(bool(old))
         self._plan_suggestions(taken)
         if self.repo.me.is_super and hasattr(self, "bulk_team"):
             cur = self.bulk_team.currentData()
@@ -1215,7 +1226,7 @@ class AgentsTab(QWidget):
                 wheel_only_when_focused(tc)
                 tc.activated.connect(lambda _i, a=ag, c=tc: self._set_team(a, c.currentData()))
                 self.pend.setCellWidget(r, 6, tc)
-        self.pend.setFixedHeight(px(40) * min(max(len(self.pending), 1), 8 if linked_mode else 4) + px(44))
+        self.pend.setFixedHeight(px(40) * min(max(len(self.pending), 1), 10 if linked_mode else 6) + px(44))
 
     def _picking(self) -> bool:
         """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있을 때만.
@@ -1309,6 +1320,27 @@ class AgentsTab(QWidget):
                         "그 실행기가 원래 있어야 할 컴퓨터를 골라 연결하세요. (주황색으로 표시돼요)")
                 QMessageBox.information(self, "연결", msg)
             self._say(msg.split("\n")[0])
+
+    def _update_old(self) -> None:
+        old = [a for a in self.pending if a.pc_id is None and not a.mac]
+        if not old:
+            return
+        names = ", ".join(a.machine for a in old[:12]) + (f" 외 {len(old) - 12}개" if len(old) > 12 else "")
+        if QMessageBox.question(
+                self, "예전 실행기 업데이트",
+                f"연결 대기 중인 예전 실행기 {len(old)}개를 다시 켤까요?\n{names}\n\n"
+                "다음 확인 때(최대 20초쯤) 그 PC의 실행기가 꺼졌다 켜지면서 새 버전으로 바뀌고, 그다음부터 MAC이 보여요.\n"
+                "LD 작업 중인 실행기는 다시 켜지 않아요 (끝난 뒤 다시 누르세요).") != QMessageBox.Yes:
+            return
+        errors = []
+        for a in old:
+            try:
+                self.repo.request_agent_restart(a.user_id)
+            except RepoError as e:
+                errors.append(f"{a.machine}: {e}")
+        self._say(f"예전 실행기 {len(old) - len(errors)}개에 다시 켜기를 보냈어요. 1분쯤 뒤 MAC이 보여요.")
+        if errors:
+            QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
 
     def _pend_check_all(self, on: bool) -> None:
         self.pend_checked = {a.user_id for a in self.pending if a.pc_id is None} if on else set()

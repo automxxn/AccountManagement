@@ -1088,6 +1088,8 @@ alter table public.pcs add column if not exists agent_settings jsonb not null de
 -- 실행기 MAC 고정: 실행기를 이 컴퓨터에 연결(=확인)하면 그 PC의 MAC 주소가 저장되고,
 -- 그 뒤로 그 MAC의 실행기는 (다시 깔아도) 항상 이 컴퓨터로 연결된다. '' = 아직 안 정함
 alter table public.pcs add column if not exists mac text not null default '';
+-- 연결 안 된 실행기에 보낼 한 번짜리 요청 (지금은 'restart_agent' = 다시 켜기 → 새 버전으로 업데이트)
+alter table public.agents add column if not exists poke text not null default '';
 
 create table if not exists public.pc_creds (
     pc_id        bigint not null references public.pcs(id) on delete cascade,
@@ -1296,6 +1298,15 @@ begin
         end if;
     end if;
     if v_ag.pc_id is null then
+        -- 연결 안 된 실행기에 다시 켜기 요청이 있으면: 예전 실행기도 알아듣게 '연결된 것처럼' 다시 켜기 명령 하나만 준다
+        -- (컴퓨터 번호 -1, 설정·계정 없음, 명령 번호 0 → 결과 보고는 아무 데도 안 적힘). 받으면 요청은 지운다
+        if v_ag.poke = 'restart_agent' then
+            update agents set poke = '' where user_id = v_ag.user_id;
+            return jsonb_build_object('pc_id', -1, 'pc_no', 0, 'pc_name', '실행기 다시 켜기', 'ld_cloud', '',
+                                      'team_id', v_ag.team_id, 'team_name', _team_name(v_ag.team_id),
+                                      'settings', '{}'::jsonb, 'creds', '',
+                                      'command', jsonb_build_object('id', 0, 'kind', 'restart_agent', 'arg', ''));
+        end if;
         return jsonb_build_object('pc_id', null, 'team_id', v_ag.team_id, 'team_name', _team_name(v_ag.team_id));
     end if;
     -- 작업장 LD클라우드 칸 = 이 실행기가 실제로 여는 클라우드 (바뀌면 기록을 남겨 다른 화면도 새로고침되게)
@@ -1482,6 +1493,21 @@ begin
     return v_id;
 end $$;
 
+-- 관리자: 연결 안 된 실행기 다시 켜기 (켜질 때 새 버전으로 업데이트). 연결된 실행기는 보통 명령(restart_agent)으로
+create or replace function public.request_agent_restart(p_agent uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare v_ag agents%rowtype;
+begin
+    select * into v_ag from agents where user_id = p_agent;
+    if not found then raise exception '없는 실행기예요. 새로고침하세요.'; end if;
+    if v_ag.pc_id is not null then raise exception '연결된 실행기는 위 표에서 체크하고 [실행기 다시 켜기]를 누르세요.'; end if;
+    if not (is_super() or (v_ag.team_id is not null and is_team_admin(v_ag.team_id))) then
+        raise exception '이 팀 관리자만 할 수 있어요.';
+    end if;
+    update agents set poke = 'restart_agent' where user_id = p_agent;
+    perform _log('실행기 다시 켜기 요청', v_ag.machine || ' (v' || v_ag.version || ', 연결 대기)', v_ag.team_id);
+end $$;
+
 -- PC 조종: 컴퓨터의 MAC 고정/지우기 (p_mac = '' 이면 지움)
 create or replace function public.set_pc_mac(p_pc bigint, p_mac text) returns void
 language plpgsql security definer set search_path = public as $$
@@ -1587,5 +1613,6 @@ grant execute on function
     public.set_agent_team(uuid, bigint), public._agent_cloud_ids(jsonb, text),
     public.new_join_code(bigint), public.agent_join_team(text),
     public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds(),
-    public._norm_mac(text), public._agent_macs(jsonb), public.set_pc_mac(bigint, text)
+    public._norm_mac(text), public._agent_macs(jsonb), public.set_pc_mac(bigint, text),
+    public.request_agent_restart(uuid)
 to authenticated;

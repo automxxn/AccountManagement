@@ -583,6 +583,10 @@ class CloudRepository:
                 r[k] = _local_time(r.get(k))
         return rows
 
+    def request_agent_restart(self, agent_id: str) -> None:
+        """연결 안 된 실행기 다시 켜기 (다음 확인 때 켜지면서 새 버전으로 업데이트)."""
+        self._rpc("request_agent_restart", {"p_agent": agent_id})
+
     def set_pc_mac(self, pc_id: int, mac: str) -> None:
         """컴퓨터에 실행기 MAC 고정 ('' = 지움)."""
         self._rpc("set_pc_mac", {"p_pc": pc_id, "p_mac": mac or ""})
