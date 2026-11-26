@@ -128,7 +128,9 @@ class SheetNav(QObject):
             self.zoom = 1.0
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        table.viewport().installEventFilter(self)
+        vp = table.viewport()
+        vp.installEventFilter(self)
+        table.destroyed.connect(lambda *_: self.__dict__.pop("table", None))
         self._style()   # 저장해 둔 표 크기를 바로 적용 (줄 높이·열 너비는 표를 그릴 때 맞춤)
 
     def font_px(self) -> int:
@@ -160,11 +162,19 @@ class SheetNav(QObject):
         self.apply()
 
     def eventFilter(self, obj, ev) -> bool:
-        try:
-            if obj is not self.table.viewport():
-                return False
-        except RuntimeError:  # 프로그램을 닫는 중이라 표가 이미 없어진 경우
+        # 창을 닫거나 프로그램을 끄는 중에는 표(또는 이 객체의 파이썬 쪽 정보)가 먼저 없어진 채로
+        # 이벤트가 올 수 있다 → 그때는 아무것도 하지 않는다
+        table = self.__dict__.get("table")
+        if table is None:
             return False
+        try:
+            if obj is not table.viewport():
+                return False
+            return self._handle(obj, ev)
+        except (RuntimeError, AttributeError):
+            return False
+
+    def _handle(self, obj, ev) -> bool:
         t = ev.type()
         if t == QEvent.Wheel and ev.modifiers() & Qt.ControlModifier:
             self.set(self.zoom + (self.STEP if ev.angleDelta().y() > 0 else -self.STEP))
