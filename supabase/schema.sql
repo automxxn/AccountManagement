@@ -1247,6 +1247,14 @@ begin
     end if;
     if p_pc is not null then
         update pcs set ld_cloud = _cloud_name(v_ag.state -> 'cfg' ->> 'cloud'), updated_at = now() where id = p_pc;
+        -- 이 컴퓨터에 클라우드가 아직 안 정해져 있으면 이 실행기의 클라우드를 기억 (다음에 켜지면 자동 연결)
+        if _cloud_id(v_ag.state -> 'cfg' ->> 'cloud') is not null then
+            update pcs set agent_settings = coalesce(agent_settings, '{}'::jsonb)
+                                           || jsonb_build_object('cloud', v_ag.state -> 'cfg' ->> 'cloud')
+             where id = p_pc and coalesce(agent_settings ->> 'cloud', '') = ''
+               and not exists (select 1 from pcs q where q.id <> p_pc
+                               and _cloud_id(q.agent_settings ->> 'cloud') = _cloud_id(v_ag.state -> 'cfg' ->> 'cloud'));
+        end if;
     end if;
     perform _log(case when p_pc is null then '실행기 연결 끊기' else '실행기 연결' end,
                  v_ag.machine || coalesce(' → ' || _pc_no_label(p_pc), ''), coalesce(v_team, _pc_team(v_ag.pc_id)));
