@@ -601,6 +601,9 @@ class AgentsTab(QWidget):
             return
         taken = set(self.agents)
         key = (tuple(a.user_id for a in self.pending), tuple(p.id for p in self.pcs), tuple(sorted(taken)))
+        if key != self._pending_key and self._picking():
+            # 컴퓨터를 고르는 중(목록이 열려 있거나 그 칸을 누른 상태)이면 다 고를 때까지 새로 만들지 않는다
+            return
         if key == self._pending_key:
             # 같은 목록이면 칸을 다시 만들지 않는다 (고르던 상자가 닫히거나 바뀌지 않게). 마지막 연락만 갱신
             for r, ag in enumerate(self.pending):
@@ -632,6 +635,14 @@ class AgentsTab(QWidget):
             l.addStretch(1)
             self.pend.setCellWidget(r, 4, w)
         self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
+
+    def _picking(self) -> bool:
+        """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있거나 그 칸이 선택돼 있음."""
+        for r in range(self.pend.rowCount()):
+            c = self.pend.cellWidget(r, 3)
+            if isinstance(c, QComboBox) and (c.view().isVisible() or c.hasFocus()):
+                return True
+        return False
 
     def _guess_index(self, ag: Agent, combo: QComboBox, taken: set) -> int:
         """그 PC 실행기가 지금 여는 클라우드(또는 PC 이름)와 맞는 컴퓨터. 없으면 0(고르기)."""
