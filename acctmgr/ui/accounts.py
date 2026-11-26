@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -12,24 +11,14 @@ from PySide6.QtWidgets import (
 
 from ..db import Repository
 from ..models import STATUS_AVAILABLE, STATUS_IN_USE, Account, norm_login
-from .common import T, button, copy_text, muted, page_header, px, run_safely, status_color, style_table
-from .connect import settings
+from .common import button, copy_text, muted, page_header, px, run_safely, style_table
 from .dialogs import AccountDialog, CharacterDialog
+from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells
 
-COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
-           "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
-           "위치", "비고", "담당"]
-COL_WORKER = 15  # 담당은 맨 오른쪽
-CHAR_COLS = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
-WIDE_COLS = (7, 8, 9, 10, 14)
-TZOOM_MIN, TZOOM_MAX, TZOOM_STEP = 0.6, 2.0, 0.1  # 계정 표만 따로 쓰는 크기
+COLUMNS = ACCOUNT_COLUMNS
+COL_WORKER = ACC_WORKER  # 담당은 맨 오른쪽
+CHAR_COLS = ACC_CHAR     # 누르면 캐릭터 창
 FILTERS = ["전체", STATUS_AVAILABLE, STATUS_IN_USE, "메랜정지", "플래닛정지", "탈퇴", "중복 의심"]
-
-
-def ban_text(ban) -> str:
-    if not ban.active():
-        return ""
-    return f"정지 ~{ban.until}" if ban.until else "정지 (기한 없음)"
 
 
 class AccountsTab(QWidget):
@@ -89,24 +78,16 @@ class AccountsTab(QWidget):
         self.table.cellDoubleClicked.connect(lambda r, c: None if c in CHAR_COLS else self._edit())
         self.table.setMouseTracking(True)
         self.table.cellEntered.connect(
-            lambda r, c: None if self._drag else
+            lambda r, c: None if self.nav.drag else
             self.table.viewport().setCursor(Qt.PointingHandCursor if c in CHAR_COLS else Qt.ArrowCursor))
-        # 표 전용 조작: Ctrl + 휠 = 표 크기, 휠 버튼 누르고 끌기 = 이동
-        self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.table.viewport().installEventFilter(self)
-        self._drag = None
-        try:
-            self.tzoom = float(settings().value("table_zoom", 1.0))
-        except (TypeError, ValueError):
-            self.tzoom = 1.0
+        self.nav = SheetNav(self.table, "table_zoom", self._render)  # Ctrl+휠 = 표 크기, 휠 누르고 끌기 = 이동
 
         brow = QHBoxLayout()
         brow.setSpacing(6)
         self.count_label = muted()
         brow.addWidget(self.count_label)
         brow.addSpacing(10)
-        self.tzoom_btn = button("", "ghost", lambda: self._set_tzoom(1.0), "누르면 100%로")
+        self.tzoom_btn = button("", "ghost", lambda: self.nav.set(1.0), "누르면 100%로")
         brow.addWidget(self.tzoom_btn)
         brow.addStretch(1)
         self.worker_names: dict = {}
@@ -131,60 +112,10 @@ class AccountsTab(QWidget):
         lay.addWidget(self.table, 1)
         lay.addLayout(brow)
         self.dups: set = set()
-        self._apply_tzoom()
+        self.nav.apply()
 
     def restyle(self) -> None:
-        self._apply_tzoom()
-
-    # ---------------------------------------------------------------- 표 크기 / 끌어서 이동
-    def _fs(self) -> int:
-        return px(13 * self.tzoom)
-
-    def _apply_tzoom(self) -> None:
-        fs = self._fs()
-        self.table.setStyleSheet(f"QTableWidget {{ font-size: {fs}px; }} QHeaderView::section {{ font-size: {fs}px; }}")
-        self.table.verticalHeader().setDefaultSectionSize(px(36 * self.tzoom))
-        self.tzoom_btn.setText(f"표 크기 {round(self.tzoom * 100)}%  ·  Ctrl+휠로 조절, 휠 누르고 끌면 이동")
-        self._render()
-
-    def _set_tzoom(self, z: float) -> None:
-        self.tzoom = round(min(TZOOM_MAX, max(TZOOM_MIN, z)), 2)
-        settings().setValue("table_zoom", self.tzoom)
-        self._apply_tzoom()
-
-    def eventFilter(self, obj, ev) -> bool:
-        if obj is not self.table.viewport():
-            return False
-        t = ev.type()
-        if t == QEvent.Wheel and ev.modifiers() & Qt.ControlModifier:
-            self._set_tzoom(self.tzoom + (TZOOM_STEP if ev.angleDelta().y() > 0 else -TZOOM_STEP))
-            return True
-        # 휠 버튼을 꾹 누른 채 움직이면 표 보는 위치(시점)를 상하좌우로 옮긴다.
-        # 화면 좌표로 계산하고 마우스를 잡아 두므로 표 밖으로 나가도 계속 움직인다.
-        if t == QEvent.MouseButtonPress and ev.button() == Qt.MiddleButton:
-            self._drag = (ev.globalPosition().toPoint(), self.table.horizontalScrollBar().value(),
-                          self.table.verticalScrollBar().value())
-            obj.setCursor(Qt.SizeAllCursor)
-            obj.grabMouse()
-            return True
-        if t == QEvent.MouseMove and self._drag:
-            if not (ev.buttons() & Qt.MiddleButton):  # 버튼을 뗀 신호를 놓친 경우
-                self._end_drag(obj)
-                return False
-            start, h0, v0 = self._drag
-            d = ev.globalPosition().toPoint() - start
-            self.table.horizontalScrollBar().setValue(h0 - d.x())
-            self.table.verticalScrollBar().setValue(v0 - d.y())
-            return True
-        if t == QEvent.MouseButtonRelease and ev.button() == Qt.MiddleButton and self._drag:
-            self._end_drag(obj)
-            return True
-        return False
-
-    def _end_drag(self, obj) -> None:
-        self._drag = None
-        obj.releaseMouse()
-        obj.setCursor(Qt.ArrowCursor)
+        self.nav.apply()
 
     def refresh(self) -> None:
         self.accs = self.repo.list_accounts()
@@ -225,59 +156,19 @@ class AccountsTab(QWidget):
         rows = self._visible()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
-        bold = QFont(self.table.font())
-        bold.setPixelSize(self._fs())
-        bold.setBold(True)
+        bold = self.nav.bold_font()
         for r, a in enumerate(rows):
-            status = "● 탈퇴" if a.withdrawn else ("● " + a.status)
-            mr, pl = a.chars("메랜"), a.chars("플래닛")
-
-            def nick(cs):
-                if not cs:
-                    return ""
-                return cs[0].nickname + (f"  (대표 · 외 {len(cs) - 1})" if len(cs) > 1 else "")
-
-            vals = [status, a.owner, a.contact, a.provider, a.login_id,
-                    a.password if self.show_pw else ("●" * 6 if a.password else ""), a.tag,
-                    nick(mr), mr[0].lj if mr else "", nick(pl), pl[0].lj if pl else "",
-                    ban_text(a.mr_ban), ban_text(a.pl_ban),
-                    a.location.text() if a.location else "",
-                    a.note.replace("\n", " / "),                                    # 비고
-                    self.worker_names.get(a.worker_id, "") if a.worker_id else ""]  # 담당 (맨 오른쪽)
-            assert len(vals) == len(COLUMNS)
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(v)
-                it.setData(Qt.UserRole, a.id)
-                color = None
-                if c == 0:
-                    color = status_color("탈퇴" if a.withdrawn else a.status)
-                    it.setFont(bold)
-                elif a.withdrawn:
-                    color = T("faint")
-                elif c in (11, 12) and v:
-                    color = T("danger")
-                elif c in CHAR_COLS:
-                    cs = mr if CHAR_COLS[c] == "메랜" else pl
-                    if len(cs) > 1:
-                        color = T("accent_text")
-                    it.setToolTip("\n".join(("★ " if i == 0 else "   ") + ch.text() for i, ch in enumerate(cs))
-                                  + ("\n\n눌러서 캐릭터 추가/수정/대표 변경" if cs else "눌러서 캐릭터 추가"))
-                if color:
-                    it.setForeground(QColor(color))
-                if a.withdrawn:
-                    it.setToolTip("탈퇴한 계정 (작업장에 넣을 수 없어요)")
-                self.table.setItem(r, c, it)
+            fill_account_cells(self.table, r, 0, a, self.show_pw, self.worker_names, bold)
         self.table.setSortingEnabled(True)
-        self.table.resizeColumnsToContents()
-        for c in WIDE_COLS:
-            self.table.setColumnWidth(c, min(self.table.columnWidth(c) + 8, px(220 * self.tzoom)))
+        cap_widths(self.table, 0, self.nav.zoom)
+        self.tzoom_btn.setText(self.nav.label())
         self.count_label.setText(f"{len(rows)}개 표시 · 캐릭터 칸을 누르면 캐릭터 창이 열려요")
 
     def _cell_clicked(self, r: int, c: int) -> None:
         if c not in CHAR_COLS:
             return
         it = self.table.item(r, 0)
-        a = next((x for x in self.accs if it and x.id == it.data(Qt.UserRole)), None)
+        a = next((x for x in self.accs if it and x.id == it.data(ID_ROLE)), None)
         if a and CharacterDialog(self.repo, a, CHAR_COLS[c], self).exec():
             self.refresh()
             self.changed.emit()
@@ -287,7 +178,7 @@ class AccountsTab(QWidget):
         if r < 0:
             return None
         it = self.table.item(r, 0)
-        aid = it.data(Qt.UserRole) if it else None
+        aid = it.data(ID_ROLE) if it else None
         return next((a for a in self.accs if a.id == aid), None)
 
     def _add(self) -> None:

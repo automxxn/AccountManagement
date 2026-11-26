@@ -1,0 +1,168 @@
+"""계정 화면과 작업장이 같이 쓰는 시트(표) 부품.
+
+- ACCOUNT_COLUMNS: 계정 정보 열 (두 화면이 같은 순서로 보여준다)
+- fill_account_cells: 한 줄에 계정 정보를 채운다
+- SheetNav: Ctrl + 휠 = 표 크기, 휠 버튼 누르고 끌기 = 보는 위치 이동
+"""
+from __future__ import annotations
+
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem
+
+from ..models import Account
+from .common import T, px, status_color
+from .connect import settings
+
+ACCOUNT_COLUMNS = ["상태", "명의자", "연락처", "유형", "아이디", "비밀번호", "메월코드",
+                   "메랜닉", "메랜 레벨/직업", "플래닛닉", "플래닛 레벨/직업", "메랜정지", "플래닛정지",
+                   "위치", "비고", "담당"]
+# 아래 번호는 계정 열 안에서의 순서 (표에 앞쪽 열이 더 있으면 그만큼 더해서 쓴다)
+ACC_CHAR = {7: "메랜", 8: "메랜", 9: "플래닛", 10: "플래닛"}  # 누르면 캐릭터 창
+ACC_BAN = (11, 12)
+ACC_WIDE = (7, 8, 9, 10, 14)
+ACC_WORKER = 15  # 담당 (맨 오른쪽, 클라우드 관리자에게만 보임)
+
+ID_ROLE = Qt.UserRole          # 칸에 붙여 두는 계정 id
+GROUP_END_ROLE = Qt.UserRole + 1  # 이 줄 아래에 묶음(컴퓨터) 구분선을 굵게
+
+
+def ban_text(ban) -> str:
+    if not ban.active():
+        return ""
+    return f"정지 ~{ban.until}" if ban.until else "정지 (기한 없음)"
+
+
+def _nick(cs) -> str:
+    if not cs:
+        return ""
+    return cs[0].nickname + (f"  (대표 · 외 {len(cs) - 1})" if len(cs) > 1 else "")
+
+
+def account_values(a: Account, show_pw: bool, worker_names: dict) -> list[str]:
+    mr, pl = a.chars("메랜"), a.chars("플래닛")
+    vals = ["● 탈퇴" if a.withdrawn else ("● " + a.status), a.owner, a.contact, a.provider, a.login_id,
+            a.password if show_pw else ("●" * 6 if a.password else ""), a.tag,
+            _nick(mr), mr[0].lj if mr else "", _nick(pl), pl[0].lj if pl else "",
+            ban_text(a.mr_ban), ban_text(a.pl_ban),
+            a.location.text() if a.location else "",
+            a.note.replace("\n", " / "),                                    # 비고
+            worker_names.get(a.worker_id, "") if a.worker_id else ""]       # 담당
+    assert len(vals) == len(ACCOUNT_COLUMNS)
+    return vals
+
+
+def fill_account_cells(table: QTableWidget, row: int, offset: int, a: Account, show_pw: bool,
+                       worker_names: dict, bold: QFont, extra_role: dict | None = None) -> None:
+    """row 줄의 offset 열부터 계정 정보를 채운다."""
+    mr, pl = a.chars("메랜"), a.chars("플래닛")
+    for i, v in enumerate(account_values(a, show_pw, worker_names)):
+        it = QTableWidgetItem(v)
+        it.setData(ID_ROLE, a.id)
+        for role, val in (extra_role or {}).items():
+            it.setData(role, val)
+        color = None
+        if i == 0:
+            color = status_color("탈퇴" if a.withdrawn else a.status)
+            it.setFont(bold)
+        elif a.withdrawn:
+            color = T("faint")
+        elif i in ACC_BAN and v:
+            color = T("danger")
+        elif i in ACC_CHAR:
+            cs = mr if ACC_CHAR[i] == "메랜" else pl
+            if len(cs) > 1:
+                color = T("accent_text")
+            it.setToolTip("\n".join(("★ " if k == 0 else "   ") + ch.text() for k, ch in enumerate(cs))
+                          + ("\n\n눌러서 캐릭터 추가/수정/대표 변경" if cs else "눌러서 캐릭터 추가"))
+        if color:
+            it.setForeground(QColor(color))
+        if a.withdrawn:
+            it.setToolTip("탈퇴한 계정 (작업장에 넣을 수 없어요)")
+        table.setItem(row, offset + i, it)
+
+
+class SheetNav(QObject):
+    """표 전용 조작. Ctrl + 휠 = 표 크기(따로 저장), 휠 버튼 누른 채 움직이기 = 보는 위치 이동."""
+
+    MIN, MAX, STEP = 0.6, 2.0, 0.1
+
+    def __init__(self, table: QTableWidget, settings_key: str, on_change):
+        super().__init__(table)
+        self.table = table
+        self.key = settings_key
+        self.on_change = on_change
+        self.drag = None
+        try:
+            self.zoom = float(settings().value(settings_key, 1.0))
+        except (TypeError, ValueError):
+            self.zoom = 1.0
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.viewport().installEventFilter(self)
+
+    def font_px(self) -> int:
+        return px(13 * self.zoom)
+
+    def bold_font(self) -> QFont:
+        f = QFont(self.table.font())
+        f.setPixelSize(self.font_px())
+        f.setBold(True)
+        return f
+
+    def label(self) -> str:
+        return f"표 크기 {round(self.zoom * 100)}%  ·  Ctrl+휠로 조절, 휠 누르고 끌면 이동"
+
+    def apply(self) -> None:
+        fs = self.font_px()
+        self.table.setStyleSheet(f"QTableWidget {{ font-size: {fs}px; }} QHeaderView::section {{ font-size: {fs}px; }}")
+        self.table.verticalHeader().setDefaultSectionSize(px(36 * self.zoom))
+        self.on_change()
+
+    def set(self, z: float) -> None:
+        self.zoom = round(min(self.MAX, max(self.MIN, z)), 2)
+        settings().setValue(self.key, self.zoom)
+        self.apply()
+
+    def eventFilter(self, obj, ev) -> bool:
+        try:
+            if obj is not self.table.viewport():
+                return False
+        except RuntimeError:  # 프로그램을 닫는 중이라 표가 이미 없어진 경우
+            return False
+        t = ev.type()
+        if t == QEvent.Wheel and ev.modifiers() & Qt.ControlModifier:
+            self.set(self.zoom + (self.STEP if ev.angleDelta().y() > 0 else -self.STEP))
+            return True
+        # 휠 버튼을 꾹 누른 채 움직이면 보는 위치를 상하좌우로 옮긴다 (표 밖으로 나가도 계속)
+        if t == QEvent.MouseButtonPress and ev.button() == Qt.MiddleButton:
+            self.drag = (ev.globalPosition().toPoint(), self.table.horizontalScrollBar().value(),
+                         self.table.verticalScrollBar().value())
+            obj.setCursor(Qt.SizeAllCursor)
+            obj.grabMouse()
+            return True
+        if t == QEvent.MouseMove and self.drag:
+            if not (ev.buttons() & Qt.MiddleButton):  # 버튼 뗀 신호를 놓친 경우
+                self._end(obj)
+                return False
+            start, h0, v0 = self.drag
+            d = ev.globalPosition().toPoint() - start
+            self.table.horizontalScrollBar().setValue(h0 - d.x())
+            self.table.verticalScrollBar().setValue(v0 - d.y())
+            return True
+        if t == QEvent.MouseButtonRelease and ev.button() == Qt.MiddleButton and self.drag:
+            self._end(obj)
+            return True
+        return False
+
+    def _end(self, obj) -> None:
+        self.drag = None
+        obj.releaseMouse()
+        obj.setCursor(Qt.ArrowCursor)
+
+
+def cap_widths(table: QTableWidget, offset: int, zoom: float) -> None:
+    """내용에 맞춰 너비를 정하되 긴 열(캐릭터, 비고)은 너무 넓어지지 않게."""
+    table.resizeColumnsToContents()
+    for c in ACC_WIDE:
+        table.setColumnWidth(offset + c, min(table.columnWidth(offset + c) + 8, px(220 * zoom)))

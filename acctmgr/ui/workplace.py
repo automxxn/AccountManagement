@@ -4,20 +4,26 @@ from __future__ import annotations
 import copy
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontMetrics
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
 from ..models import GAMES, PC, PROVIDERS, Account, owner_rule_violation
 from .common import (
-    StatCard, T, badge, button, copy_text, label, muted, page_header, px, run_safely, vline,
+    GridDelegate, StatCard, T, badge, button, copy_text, label, muted, page_header, px, run_safely, style_table,
+    vline,
 )
-from .dialogs import AccountDialog, PcDialog
+from .dialogs import AccountDialog, CharacterDialog, PcDialog
+from .sheet import ACC_CHAR, ACC_WORKER, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetNav, cap_widths, fill_account_cells
 
 PC_FILTERS = ["모든 컴퓨터", "빈 자리가 있는 컴퓨터", "정지 계정이 있는 컴퓨터"]
 MIN_SLOTS = 2  # 컴퓨터마다 기본 자리 수 (이 밑으로는 줄일 수 없음)
+PC_COLUMNS = ["번호", "컴퓨터", "LD클라우드", "AnyDesk", "리모트T", "컴퓨터 담당", "자리"]
+PC_WORKER_COL = 5
+OFF = len(PC_COLUMNS)  # 계정 열이 시작하는 위치
 
 
 def _repolish(w: QWidget) -> None:
@@ -43,112 +49,6 @@ def char_line(acc: Account, compact: bool = False) -> str:
         elif not compact:
             parts.append(f"{game}: 없음")
     return "   ·   ".join(parts) if parts else "캐릭터 없음"
-
-
-class SlotWidget(QFrame):
-    """자리 한 줄: [번호] 명의자 [유형] 아이디 ……… 메랜/플래닛 대표 캐릭터 [정지]"""
-    clicked = Signal(int, int)        # pc_id, slot
-    double_clicked = Signal(int, int)
-
-    def __init__(self, pc: PC, slot: int, acc: Account | None, selected: bool, hidden: bool = False):
-        super().__init__()
-        self.pc_id, self.slot = pc.id, slot
-        self.setObjectName("slot")
-        self.setProperty("empty", acc is None and not hidden)
-        self.setProperty("locked", hidden)
-        self.setProperty("selected", selected)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setMinimumHeight(px(44))
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(px(12), px(6), px(12), px(6))
-        lay.setSpacing(px(8))
-        lay.addWidget(label(str(slot), "slotNo"))
-
-        if hidden or acc is None:
-            text = "다른 담당자의 계정 사용 중" if hidden else "비어 있음 · 눌러서 계정 넣기"
-            lay.addWidget(label(text, "slotLocked" if hidden else "slotHint"))
-            lay.addStretch(1)
-            return
-
-        owner = label(acc.owner or acc.contact or "(명의자 없음)", "owner")
-        owner.setMinimumWidth(px(70))
-        lay.addWidget(owner)
-        lay.addWidget(badge(acc.provider, "info"))
-        lid = _shrinkable(muted(acc.login_id))
-        lay.addWidget(lid, 2)
-        chars = _shrinkable(label(char_line(acc, compact=True), "slotChars"))
-        tip = [f"{'★ ' if i == 0 else '   '}[{c.game}] {c.text()}" for g in GAMES for i, c in enumerate(acc.chars(g))]
-        chars.setToolTip(chr(10).join(tip))
-        lay.addWidget(chars, 3)
-        for lab in acc.ban_labels():
-            lay.addWidget(badge(lab.split("~")[0], "ban"))
-
-    def mousePressEvent(self, e):
-        self.clicked.emit(self.pc_id, self.slot)
-
-    def mouseDoubleClickEvent(self, e):
-        self.double_clicked.emit(self.pc_id, self.slot)
-
-
-class PcRow(QFrame):
-    def __init__(self, pc: PC, accs: dict[int, Account], selected: tuple | None, owner: "WorkplaceTab"):
-        super().__init__()
-        self.setObjectName("pcRow")
-        self.setProperty("active", bool(selected and selected[0] == pc.id))
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(16)
-        can_edit = owner.repo.me.is_admin or owner.repo.me.can("can_edit_pc")
-
-        info = QWidget()
-        info.setFixedWidth(px(200))
-        il = QVBoxLayout(info)
-        il.setContentsMargins(0, 0, 0, 0)
-        il.setSpacing(3)
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        head.addWidget(label(str(pc.no), "pcNo"))
-        head.addWidget(label(pc.name or "(이름 없음)", "pcName"), 1)
-        il.addLayout(head)
-        for k, v in (("LD", pc.ld_cloud), ("AnyDesk", pc.anydesk_id), ("리모트T", pc.remote_t)):
-            if v:
-                il.addWidget(muted(f"{k}  {v}"))
-        il.addStretch(1)
-        bottom = QHBoxLayout()
-        bottom.setSpacing(6)
-        if owner.worker_names:
-            if pc.worker_id:
-                bottom.addWidget(badge("담당 " + owner.worker_names.get(pc.worker_id, "?"), "worker"))
-            else:
-                bottom.addWidget(badge("담당 없음", "info"))
-        bottom.addStretch(1)
-        bottom.addWidget(button("수정" if can_edit else "정보", "ghost", lambda: owner.edit_pc(pc)))
-        il.addLayout(bottom)
-        lay.addWidget(info)
-        lay.addWidget(vline())
-
-        # 자리는 위아래로 한 줄씩
-        col = QVBoxLayout()
-        col.setSpacing(px(6))
-        for i, aid in enumerate(pc.slots, start=1):
-            w = SlotWidget(pc, i, accs.get(aid) if aid else None, selected == (pc.id, i),
-                           hidden=bool(aid) and aid not in accs)
-            w.clicked.connect(owner.select_slot)
-            w.double_clicked.connect(owner.open_slot)
-            col.addWidget(w)
-        if can_edit:
-            tools = QHBoxLayout()
-            tools.setSpacing(4)
-            tools.addStretch(1)
-            tools.addWidget(button("+ 자리 추가", "ghost", lambda: owner.change_slots(pc, +1),
-                                   "이 컴퓨터에 계정 자리를 하나 더 만들어요"))
-            if pc.slot_count > MIN_SLOTS:
-                tools.addWidget(button("- 마지막 자리 삭제", "ghost", lambda: owner.change_slots(pc, -1),
-                                       "맨 아래 자리를 없애요 (비어 있을 때만)"))
-            col.addLayout(tools)
-        col.addStretch(1)
-        lay.addLayout(col, 1)
 
 
 class WorkplaceTab(QWidget):
@@ -195,13 +95,48 @@ class WorkplaceTab(QWidget):
         self.filter.currentIndexChanged.connect(self._render_cards)
         bar.addWidget(self.search, 1)
         bar.addWidget(self.filter)
+        self.pw_btn = button("비번 보기")
+        self.pw_btn.setCheckable(True)
+        self.pw_btn.toggled.connect(lambda on: (self.pw_btn.setText("비번 가리기" if on else "비번 보기"),
+                                                self._render_cards()))
+        bar.addWidget(self.pw_btn)
         if repo.me.is_admin:
             bar.addWidget(button("+ 컴퓨터 추가", "primary", lambda: self.edit_pc(None)))
         left.addLayout(bar)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        left.addWidget(self.scroll, 1)
+
+        # 시트: [컴퓨터 정보 | 자리 | 계정 화면과 같은 열]
+        self.show_worker = repo.is_cloud and repo.me.is_admin
+        self.table = QTableWidget(0, OFF + len(ACCOUNT_COLUMNS))
+        self.table.setHorizontalHeaderLabels(PC_COLUMNS + ACCOUNT_COLUMNS)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        style_table(self.table)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(False)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setStretchLastSection(True)
+        hh.setDefaultAlignment(Qt.AlignCenter)
+        self.table.setColumnHidden(PC_WORKER_COL, not self.show_worker)
+        self.table.setColumnHidden(OFF + ACC_WORKER, not self.show_worker)
+        self.table.cellClicked.connect(self._cell_clicked)
+        self.table.cellDoubleClicked.connect(
+            lambda r, c: self.open_slot(*self._row_map[r]) if r < len(self._row_map) else None)
+        self.table.setMouseTracking(True)
+        self.table.cellEntered.connect(lambda r, c: None if self.nav.drag else self.table.viewport().setCursor(
+            Qt.PointingHandCursor if (c - OFF) in ACC_CHAR else Qt.ArrowCursor))
+        self._row_map: list[tuple[int, int]] = []
+        self.nav = SheetNav(self.table, "work_table_zoom", self._render_cards)
+        left.addWidget(self.table, 1)
+        foot = QHBoxLayout()
+        self.count_label = muted()
+        foot.addWidget(self.count_label)
+        foot.addSpacing(10)
+        self.tzoom_btn = button("", "ghost", lambda: self.nav.set(1.0), "누르면 100%로")
+        foot.addWidget(self.tzoom_btn)
+        foot.addStretch(1)
+        left.addLayout(foot)
         body.addLayout(left, 1)
 
         # 오른쪽: 자리 패널
@@ -250,7 +185,7 @@ class WorkplaceTab(QWidget):
     def restyle(self) -> None:
         """테마/배율이 바뀌었을 때 받아 둔 데이터로 다시 그린다 (서버 조회 없음)."""
         self.panel.setFixedWidth(px(380))
-        self._render_cards()
+        self.nav.apply()  # 시트를 다시 그린다
         self._render_panel()
 
     def _pc(self, pc_id: int) -> PC | None:
@@ -261,16 +196,10 @@ class WorkplaceTab(QWidget):
         self.changed.emit()
 
     # ---------------------------------------------------------------- 목록
-    def _render_cards(self) -> None:
-        pos = self.scroll.verticalScrollBar().value()
-        host = QWidget()
-        host.setObjectName("scrollHost")
-        lay = QVBoxLayout(host)
-        lay.setContentsMargins(0, 0, 6, 0)
-        lay.setSpacing(10)
+    def _visible_pcs(self) -> list[PC]:
         q = self.search.text().strip().lower()
         mode = self.filter.currentIndex()
-        n = 0
+        out = []
         for pc in self.pcs:
             accs = [self.accs[a] for a in pc.slots if a and a in self.accs]
             if q:
@@ -281,17 +210,90 @@ class WorkplaceTab(QWidget):
                 continue
             if mode == 2 and not any(a.ban_labels() for a in accs):
                 continue
-            lay.addWidget(PcRow(pc, self.accs, self.selected, self))
-            n += 1
-        if n == 0:
-            empty = muted("조건에 맞는 컴퓨터가 없어요." if self.pcs else
-                          "아직 컴퓨터가 없어요. 엑셀을 가져오거나 컴퓨터를 추가하세요.")
-            empty.setObjectName("emptyText")
-            empty.setAlignment(Qt.AlignCenter)
-            lay.addWidget(empty)
-        lay.addStretch(1)
-        self.scroll.setWidget(host)
-        self.scroll.verticalScrollBar().setValue(pos)
+            out.append(pc)
+        return out
+
+    def _render_cards(self) -> None:
+        """시트를 다시 그린다. 컴퓨터마다 자리 수만큼 줄을 만들고, 컴퓨터 정보 칸은 세로로 합친다."""
+        t = self.table
+        hpos, vpos = t.horizontalScrollBar().value(), t.verticalScrollBar().value()
+        pcs = self._visible_pcs()
+        t.clearSpans()
+        t.clearContents()
+        t.setRowCount(sum(len(pc.slots) for pc in pcs))
+        bold = self.nav.bold_font()
+        show_pw = self.pw_btn.isChecked()
+        self._row_map = []
+        r = 0
+        sel_row = -1
+        for pc in pcs:
+            start = r
+            n = len(pc.slots)
+            for i, aid in enumerate(pc.slots, start=1):
+                self._row_map.append((pc.id, i))
+                if self.selected == (pc.id, i):
+                    sel_row = r
+                end = {GROUP_END_ROLE: i == n}
+                if i == 1:
+                    worker = ((self.worker_names.get(pc.worker_id, "?") if pc.worker_id else "없음")
+                              if self.show_worker else "")
+                    for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pc.remote_t, worker]):
+                        it = QTableWidgetItem(v)
+                        it.setTextAlignment(Qt.AlignCenter)
+                        it.setData(GROUP_END_ROLE, True)  # 합친 칸의 아래가 컴퓨터 경계
+                        if c == 0:
+                            it.setFont(bold)
+                            it.setForeground(QColor(T("accent_text")))
+                        t.setItem(r, c, it)
+                slot_it = QTableWidgetItem(str(i))
+                slot_it.setTextAlignment(Qt.AlignCenter)
+                slot_it.setData(GROUP_END_ROLE, i == n)
+                t.setItem(r, OFF - 1, slot_it)
+                acc = self.accs.get(aid) if aid else None
+                if acc:
+                    fill_account_cells(t, r, OFF, acc, show_pw, self.worker_names, bold, end)
+                else:
+                    it = QTableWidgetItem("다른 담당자의 계정 사용 중" if aid else "비어 있음  ·  눌러서 계정 넣기")
+                    it.setForeground(QColor(T("muted") if aid else T("accent_text")))
+                    it.setData(GROUP_END_ROLE, i == n)
+                    t.setItem(r, OFF, it)
+                    t.setSpan(r, OFF, 1, len(ACCOUNT_COLUMNS))
+                r += 1
+            if n > 1:
+                for c in range(OFF - 1):
+                    t.setSpan(start, c, n, 1)
+        cap_widths(t, OFF, self.nav.zoom)
+        # 합친 칸(컴퓨터 정보)은 자동 너비 계산에서 빠지므로 글자 길이로 직접 맞춘다
+        fm = QFontMetrics(bold)
+        pad = px(GridDelegate.PAD) * 2 + px(10)
+        for c in range(OFF):
+            texts = [PC_COLUMNS[c]] + [t.item(row, c).text() for row in range(t.rowCount()) if t.item(row, c)]
+            t.setColumnWidth(c, max(fm.horizontalAdvance(x) for x in texts) + pad)
+        if sel_row >= 0:
+            t.selectRow(sel_row)
+        else:
+            t.clearSelection()
+        t.horizontalScrollBar().setValue(hpos)
+        t.verticalScrollBar().setValue(vpos)
+        self.tzoom_btn.setText(self.nav.label())
+        empty = sum(1 for pc in pcs for x in pc.slots if x is None)
+        if pcs:
+            self.count_label.setText(f"컴퓨터 {len(pcs)}대 표시 · 빈 자리 {empty}개")
+        else:
+            self.count_label.setText("조건에 맞는 컴퓨터가 없어요." if self.pcs else
+                                     "아직 컴퓨터가 없어요. 엑셀을 가져오거나 컴퓨터를 추가하세요.")
+
+    def _cell_clicked(self, r: int, c: int) -> None:
+        if r >= len(self._row_map):
+            return
+        pc_id, slot = self._row_map[r]
+        pc = self._pc(pc_id)
+        aid = pc.slots[slot - 1] if pc else None
+        if (c - OFF) in ACC_CHAR and aid in self.accs:
+            if CharacterDialog(self.repo, self.accs[aid], ACC_CHAR[c - OFF], self).exec():
+                self._after_change()
+            return
+        self.select_slot(pc_id, slot)
 
     # ---------------------------------------------------------------- 패널
     def _clear_panel(self) -> None:
@@ -325,6 +327,7 @@ class WorkplaceTab(QWidget):
         slot = self.selected[1]
         aid = pc.slots[slot - 1] if pc and slot <= len(pc.slots) else None
         self.panel_title.setText(f"{pc.no}번 컴퓨터 · {slot}자리")
+        self._pc_tools(pc)
         if aid and aid in self.accs:
             self.panel_sub.setText(pc.name)
             self._render_occupied(self.accs[aid])
@@ -337,6 +340,23 @@ class WorkplaceTab(QWidget):
         else:
             self.panel_sub.setText("빈 자리예요. 넣을 계정을 고르세요.")
             self._render_picker()
+
+    def _pc_tools(self, pc: PC) -> None:
+        """패널 맨 위: 이 컴퓨터 수정, 자리 추가/삭제."""
+        can_edit = self.repo.me.is_admin or self.repo.me.can("can_edit_pc")
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(button("컴퓨터 수정" if can_edit else "컴퓨터 정보", "", lambda: self.edit_pc(pc)))
+        if can_edit:
+            row.addWidget(button("+ 자리", "", lambda: self.change_slots(pc, +1), "이 컴퓨터에 계정 자리를 하나 더 만들어요"))
+            if pc.slot_count > MIN_SLOTS:
+                row.addWidget(button("- 자리", "", lambda: self.change_slots(pc, -1), "맨 아래 자리를 없애요 (비어 있을 때만)"))
+        row.addStretch(1)
+        self.panel_lay.addLayout(row)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background:{T('line')};")
+        self.panel_lay.addWidget(line)
 
     def _field(self, grid: QGridLayout, row: int, name: str, value: str, copy: str | None = None) -> None:
         k = muted(name)
@@ -469,7 +489,9 @@ class WorkplaceTab(QWidget):
     # ---------------------------------------------------------------- 동작
     def select_slot(self, pc_id: int, slot: int) -> None:
         self.selected = (pc_id, slot)
-        self._render_cards()
+        rows = [i for i, x in enumerate(self._row_map) if x == (pc_id, slot)]
+        if rows:
+            self.table.selectRow(rows[0])
         self._render_panel()
 
     def open_slot(self, pc_id: int, slot: int) -> None:
