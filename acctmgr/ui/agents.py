@@ -79,6 +79,18 @@ def cloud_sort_key(c: str):
     return (m.group(1), int(m.group(2)), c) if m else (c or "", 0, c or "")
 
 
+def reset_pc_launcher(repo, pc, agent: Agent | None) -> None:
+    """이 컴퓨터의 실행기 초기화: 정해 둔 클라우드를 지우고(그래야 같은 컴퓨터로 다시 자동 연결되지 않음)
+    연결된 실행기를 떼어낸다. 떼어낸 실행기는 연결 대기로 돌아간다."""
+    s = dict(pc.agent_settings or {})
+    if "cloud" in s:
+        s.pop("cloud")
+        repo.set_agent_settings(pc.id, s)
+        pc.agent_settings = s
+    if agent is not None:
+        repo.link_agent(agent.user_id, None)
+
+
 def _item(text: str, center: bool = False) -> QTableWidgetItem:
     it = QTableWidgetItem(text)
     it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -316,9 +328,10 @@ class AgentSettingsDialog(QDialog):
 
     def _unlink(self) -> None:
         if QMessageBox.question(self, "연결 끊기", f"'{self.agent.machine}' 실행기를 이 컴퓨터에서 떼어낼까요?\n"
-                                "다시 연결하기 전까지 이 컴퓨터에는 명령을 보낼 수 없어요.") != QMessageBox.Yes:
+                                "이 컴퓨터에 정해 둔 클라우드도 지워서 다시 자동으로 붙지 않게 해요.\n"
+                                "떼어낸 실행기는 연결 대기로 돌아가요.") != QMessageBox.Yes:
             return
-        if run_safely(self, self.repo.link_agent, self.agent.user_id, None):
+        if run_safely(self, reset_pc_launcher, self.repo, self.pc, self.agent):
             self.unlinked = True
             self.accept()
 
@@ -464,6 +477,9 @@ class AgentsTab(QWidget):
                               "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
         bar2.addWidget(button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
                               "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요"))
+        if repo.me.is_admin:
+            bar2.addWidget(button("선택한 컴퓨터 실행기 초기화", "danger", self._reset_checked,
+                                  "체크한 컴퓨터의 정한 클라우드를 지우고 실행기 연결을 끊어요. 실행기는 연결 대기로 돌아가요"))
         bar2.addStretch(1)
 
         self.table = QTableWidget(0, len(COLS))
@@ -604,11 +620,13 @@ class AgentsTab(QWidget):
             else:
                 live = (ag.state or {}).get("realtime")
                 speed = "" if not ag.online or live is None else ("  · 즉시" if live else "  · 20초마다")
-                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed + f"  v{ag.version}")
+                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed + f"\n{ag.machine}")
                 st.setForeground(green if ag.online else gray)
+                tip = f"Windows PC 이름: {ag.machine}\n실행기 버전: v{ag.version}"
                 if live is not None:
-                    st.setToolTip("실시간 연결됨: 명령이 바로 전달돼요" if live else
-                                  "실시간 연결이 안 돼서 20초마다 명령을 확인해요 (실행기 다시 켜기로 다시 시도)")
+                    tip += "\n" + ("실시간 연결됨: 명령이 바로 전달돼요" if live else
+                                    "실시간 연결이 안 돼서 20초마다 명령을 확인해요 (실행기 다시 켜기로 다시 시도)")
+                st.setToolTip(tip)
                 s = ag.state or {}
                 now = _item((("▶ " + s.get("job", "")) if s.get("busy") else s.get("last", "")) or "")
                 now.setToolTip(s.get("last", ""))
@@ -700,6 +718,32 @@ class AgentsTab(QWidget):
         self._tick()
         if errors:
             QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
+
+    def _reset_checked(self) -> None:
+        targets = [p for p in self.pcs if p.id in self.checked]
+        if not targets:
+            QMessageBox.information(self, "실행기 초기화", "초기화할 컴퓨터를 체크하세요.")
+            return
+        linked = [p for p in targets if p.id in self.agents]
+        lines = "\n".join(f"  {p.no}. {p.name}" + (f" ← {self.agents[p.id].machine}" if p.id in self.agents else "")
+                          for p in targets[:20]) + (f"\n  외 {len(targets) - 20}대" if len(targets) > 20 else "")
+        if QMessageBox.question(
+                self, "실행기 초기화",
+                f"{len(targets)}대의 정한 클라우드를 지우고, 연결된 실행기 {len(linked)}개를 떼어낼까요?\n\n{lines}\n\n"
+                "떼어낸 실행기는 연결 대기로 돌아가요. 그다음 [컴퓨터별 클라우드 정하기]로 다시 정하거나 "
+                "연결 대기에서 직접 [연결]하세요.") != QMessageBox.Yes:
+            return
+        errors = []
+        for p in targets:
+            try:
+                reset_pc_launcher(self.repo, p, self.agents.get(p.id))
+            except RepoError as e:
+                errors.append(f"{p.no}. {p.name}: {e}")
+        self.checked = set()
+        self.all_box.setChecked(False)
+        self.refresh()
+        if errors:
+            QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
 
     def _all_devices(self) -> list:
         devs = set()
