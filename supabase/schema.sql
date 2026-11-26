@@ -137,14 +137,11 @@ language sql stable security definer set search_path = public as $$
         from profiles pr where pr.id = auth.uid()), false)
 $$;
 
--- 근무자가 볼 수 있는 계정: 자기 담당 계정 + 자기 담당 컴퓨터에 들어간 계정
+-- 근무자가 볼 수 있는 계정: 자기 담당 계정만 (담당 컴퓨터에 들어 있어도 다른 사람 담당이면 안 보임)
 create or replace function public.can_see_account(a_id bigint) returns boolean
 language sql stable security definer set search_path = public as $$
     select is_admin()
-        or (is_member() and (
-            exists (select 1 from accounts a where a.id = a_id and a.worker_id = auth.uid())
-            or exists (select 1 from assignments s join pcs p on p.id = s.pc_id
-                       where s.account_id = a_id and p.worker_id = auth.uid())))
+        or (is_member() and exists (select 1 from accounts a where a.id = a_id and a.worker_id = auth.uid()))
 $$;
 
 create or replace function public.owns_pc(p_id bigint) returns boolean
@@ -390,6 +387,10 @@ language plpgsql security definer set search_path = public as $$
 declare v_acc bigint;
 begin
     if not owns_pc(p_pc) then raise exception '담당 컴퓨터가 아니에요.'; end if;
+    select account_id into v_acc from assignments where pc_id = p_pc and slot = p_slot;
+    if v_acc is not null and not can_see_account(v_acc) then
+        raise exception '다른 담당자의 계정이라 뺄 수 없어요. 관리자에게 요청하세요.';
+    end if;
     delete from assignments where pc_id = p_pc and slot = p_slot returning account_id into v_acc;
     if v_acc is not null then
         perform _log('빼기', _pc_label(p_pc, p_slot) || ' → ' || _acc_label(v_acc));
@@ -405,6 +406,7 @@ begin
     select pc_id, slot into v_src from assignments where account_id = p_account;
     if not found then raise exception '이 계정은 어느 자리에도 없어요.'; end if;
     if not (owns_pc(v_src.pc_id) and owns_pc(p_pc)) then raise exception '담당 컴퓨터끼리만 옮길 수 있어요.'; end if;
+    if not can_see_account(p_account) then raise exception '담당 계정이 아니에요.'; end if;
     select * into v_pc from pcs where id = p_pc;
     if not found or p_slot < 1 or p_slot > v_pc.slot_count then raise exception '없는 자리예요.'; end if;
     begin

@@ -17,15 +17,19 @@ class SlotWidget(QFrame):
     clicked = Signal(int, int)        # pc_id, slot
     double_clicked = Signal(int, int)
 
-    def __init__(self, pc: PC, slot: int, acc: Account | None, selected: bool):
+    def __init__(self, pc: PC, slot: int, acc: Account | None, selected: bool, hidden: bool = False):
         super().__init__()
         self.pc_id, self.slot = pc.id, slot
         self.setObjectName("slot")
-        self.setProperty("empty", acc is None)
+        self.setProperty("empty", acc is None and not hidden)
         self.setProperty("selected", selected)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(8, 5, 8, 5)
+        if hidden:  # 다른 담당자의 계정이 들어 있는 자리 (근무자 화면)
+            lay.addWidget(muted(f"{slot}자리 · 다른 담당자의 계정 사용 중"))
+            lay.addStretch(1)
+            return
         if acc is None:
             lab = muted(f"+ {slot}자리 비어있음")
             lay.addStretch(1)
@@ -75,7 +79,8 @@ class PcCard(QFrame):
         if info:
             lay.addWidget(muted(info))
         for i, aid in enumerate(pc.slots, start=1):
-            w = SlotWidget(pc, i, accs.get(aid) if aid else None, selected == (pc.id, i))
+            w = SlotWidget(pc, i, accs.get(aid) if aid else None, selected == (pc.id, i),
+                           hidden=bool(aid) and aid not in accs)
             w.clicked.connect(owner.select_slot)
             w.double_clicked.connect(owner.open_slot)
             lay.addWidget(w)
@@ -233,6 +238,9 @@ class WorkplaceTab(QWidget):
         L.addWidget(t)
         if aid and aid in self.accs:
             self._render_occupied(self.accs[aid])
+        elif aid:
+            L.addWidget(muted("다른 담당자의 계정이 들어 있는 자리예요. 정보를 볼 수 없고, 빼거나 바꾸려면 관리자에게 요청하세요."))
+            L.addStretch(1)
         else:
             self._render_picker()
 
