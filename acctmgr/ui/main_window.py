@@ -90,7 +90,8 @@ class MainWindow(QMainWindow):
         self.workers_tab = WorkersTab(repo) if (self.cloud and me.is_admin) else None
         self.teams_tab = TeamsTab(repo) if (self.cloud and me.is_super) else None
         # PC 조종: LD CLOUD 실행기에 명령 보내기 (관리자, 또는 'PC 조종' 권한을 받은 사람)
-        self.agents_tab = AgentsTab(repo) if (self.cloud and (me.is_admin or me.can("can_control_pc"))) else None
+        self.agents_tab = AgentsTab(repo) if (self.cloud and (me.is_admin or me.can("can_control_pc")
+                                                             or me.can("can_link_agent"))) else None
         # 근무자는 근무자 관리에서 켜 준 메뉴만 보인다 (관리자는 전부)
         self.pages = []
         if me.can("can_view_workplace"):

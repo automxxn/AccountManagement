@@ -252,9 +252,10 @@ PERMS = (
     ("can_edit_pc", "컴퓨터 수정"),
     ("can_delete_pc", "컴퓨터 삭제"),
     ("can_control_pc", "PC 조종"),
+    ("can_link_agent", "실행기 연결"),
 )
 # 관리자는 맡은 팀에서 항상 할 수 있는 것 (근무자에게만 켜고 끔)
-ADMIN_ALWAYS = ("can_add_pc", "can_delete_pc")
+ADMIN_ALWAYS = ("can_add_pc", "can_delete_pc", "can_link_agent")
 
 ROLES = {"super": "총관리자", "admin": "관리자", "worker": "근무자", "pending": "승인 대기"}
 
@@ -285,6 +286,7 @@ class Profile:
     can_control_pc: bool = True     # LD CLOUD 실행기에 명령 보내기 (로컬은 혼자라 켬)
     can_add_pc: bool = True         # 컴퓨터 추가 (관리자는 항상)
     can_delete_pc: bool = True      # 컴퓨터 삭제 (관리자는 항상)
+    can_link_agent: bool = True     # 연결 대기 실행기 보기·연결(MAC 고정)·지우기 (관리자는 항상)
     teams: list[int] = field(default_factory=list)  # 속한 팀 (근무자 1개, 관리자 여러 개)
 
     @property

@@ -104,7 +104,7 @@ class ViewAsRepo:
         out = []
         for a in ags:
             if a.pc_id is None:
-                if self.me.role == "admin" and a.team_id in mine:
+                if self.me.can("can_link_agent") and a.team_id in mine:
                     out.append(a)
             else:
                 out.append(a)

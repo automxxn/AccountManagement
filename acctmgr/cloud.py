@@ -391,6 +391,7 @@ class CloudRepository:
                        can_control_pc=r.get("can_control_pc", False),
                        can_add_pc=r.get("can_add_pc", False),
                        can_delete_pc=r.get("can_delete_pc", False),
+                       can_link_agent=r.get("can_link_agent", False),
                        teams=sorted(m["team_id"] for m in (r.get("team_members") or [])))
 
     def _account_payload(self, a: Account, encrypt: bool = True) -> dict:
@@ -531,6 +532,7 @@ class CloudRepository:
             "can_view_workplace": p.can_view_workplace, "can_view_accounts": p.can_view_accounts,
             "can_assign_team": p.can_assign_team, "can_control_pc": p.can_control_pc,
             "can_add_pc": p.can_add_pc, "can_delete_pc": p.can_delete_pc,
+            "can_link_agent": p.can_link_agent,
             "teams": list(p.teams)}})
 
     def bulk_import(self, accounts: list[Account], pcs: list[PC], links: list[tuple[int, int, int]]) -> int:
@@ -601,7 +603,7 @@ class CloudRepository:
 
     def sync_pc_creds(self) -> int:
         """연결된 PC 실행기에 그 컴퓨터 1·2자리 계정(A·B)을 그 PC만 열 수 있게 잠가서 올린다. 올린/지운 수."""
-        if not (self.me.is_admin or self.me.can("can_control_pc")) or not self.ciphers:
+        if not (self.me.is_admin or self.me.can("can_control_pc") or self.me.can("can_link_agent")) or not self.ciphers:
             return 0
         agents = [a for a in self.list_agents() if a.pc_id and a.public_key]
         if not agents:
@@ -617,17 +619,22 @@ class CloudRepository:
         accs = {r["id"]: r for r in self._get("accounts", {
             "select": "id,team_id,provider,login_id,password,version", "id": f"in.({acc_ids})"})}
         n = 0
+        # 자리가 비었는지는 작업장을 볼 수 있어야 안다. 못 보는 사람은 지우지 않는다 (올리기만)
+        can_clear = self.me.is_admin or self.me.can("can_view_workplace")
         for ag in agents:
             team = pcs.get(ag.pc_id)
             cipher = self.ciphers.get(team)
             if cipher is None:
                 continue
             for slot in (1, 2):
-                acc = accs.get(slots.get((ag.pc_id, slot)))
+                assigned = slots.get((ag.pc_id, slot))
+                acc = accs.get(assigned)
                 old = have.get((ag.pc_id, slot))
                 try:
+                    if acc is None and assigned is not None:
+                        continue   # 자리에 계정은 있는데 나는 그 계정을 볼 권한이 없음 → 건드리지 않음 (지우면 안 됨)
                     if acc is None:
-                        if old is not None:
+                        if old is not None and can_clear:
                             self._rpc("set_pc_creds", {"p_pc": ag.pc_id, "p_slot": slot, "p_sealed": "", "p_fp": ""})
                             n += 1
                         continue

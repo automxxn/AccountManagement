@@ -27,6 +27,8 @@ alter table public.profiles add column if not exists can_view_accounts boolean n
 alter table public.profiles add column if not exists can_assign_team boolean not null default false;
 -- PC 조종: LD CLOUD 실행기에 명령(시작/재시작/로그인 등)을 보내고 실행기 설정을 바꿀 수 있는지
 alter table public.profiles add column if not exists can_control_pc boolean not null default false;
+-- 실행기 연결: 연결 대기 실행기를 보고 컴퓨터에 연결(=MAC 고정)·지우기·업데이트 (관리자는 항상)
+alter table public.profiles add column if not exists can_link_agent boolean not null default false;
 -- 컴퓨터 추가 / 삭제 (근무자에게 켜 줄 수 있음. 관리자는 맡은 팀에서 항상 가능)
 alter table public.profiles add column if not exists can_add_pc boolean not null default false;
 alter table public.profiles add column if not exists can_delete_pc boolean not null default false;
@@ -275,6 +277,7 @@ language sql stable security definer set search_path = public as $$
             when perm_name = 'view_workplace' then pr.can_view_workplace
             when perm_name = 'view_accounts' then pr.can_view_accounts
             when perm_name = 'control_pc' then pr.can_control_pc
+            when perm_name = 'link_agent' then pr.role = 'admin' or pr.can_link_agent
             when perm_name = 'add_pc' then pr.role = 'admin' or pr.can_add_pc
             when perm_name = 'delete_pc' then pr.role = 'admin' or pr.can_delete_pc
             else false end
@@ -836,6 +839,8 @@ begin
             then coalesce((p ->> 'can_view_accounts')::boolean, true) else v_cur.can_view_accounts end,
         can_control_pc = case when v_super or has_perm('control_pc')
             then coalesce((p ->> 'can_control_pc')::boolean, false) else v_cur.can_control_pc end,
+        can_link_agent = case when v_super or has_perm('link_agent')
+            then coalesce((p ->> 'can_link_agent')::boolean, false) else v_cur.can_link_agent end,
         can_add_pc = case when v_super or has_perm('add_pc')
             then coalesce((p ->> 'can_add_pc')::boolean, false) else v_cur.can_add_pc end,
         can_delete_pc = case when v_super or has_perm('delete_pc')
@@ -1180,6 +1185,12 @@ language sql stable security definer set search_path = public as $$
     select is_super() or (in_team(_pc_team(p)) and has_perm('control_pc'))
 $$;
 
+-- 이 팀의 실행기를 연결·정리할 수 있는지: 그 팀 관리자, 또는 '실행기 연결' 권한이 있는 그 팀 사람
+create or replace function public._can_link(t bigint) returns boolean
+language sql stable security definer set search_path = public as $$
+    select t is not null and (is_team_admin(t) or (in_team(t) and has_perm('link_agent')))
+$$;
+
 alter table public.agents       enable row level security;
 alter table public.pc_creds     enable row level security;
 alter table public.pc_commands  enable row level security;
@@ -1187,12 +1198,12 @@ alter table public.pc_commands  enable row level security;
 drop policy if exists agents_read on public.agents;
 create policy agents_read on public.agents for select to authenticated
     using (user_id = auth.uid()
-           or (pc_id is null and (is_super() or (team_id is not null and is_team_admin(team_id))))
+           or (pc_id is null and (is_super() or (team_id is not null and _can_link(team_id))))
            or (pc_id is not null and (_pc_visible(_pc_team(pc_id)) or _can_control(pc_id))));
 
 drop policy if exists pc_creds_read on public.pc_creds;
 create policy pc_creds_read on public.pc_creds for select to authenticated
-    using (pc_id = _my_agent_pc() or _can_control(pc_id) or is_team_admin(_pc_team(pc_id)));
+    using (pc_id = _my_agent_pc() or _can_control(pc_id) or _can_link(_pc_team(pc_id)));
 
 drop policy if exists pc_commands_read on public.pc_commands;
 create policy pc_commands_read on public.pc_commands for select to authenticated
@@ -1361,18 +1372,18 @@ begin
     -- 관리자는 자기 팀 실행기만 (팀이 안 정해진 실행기는 총관리자가 먼저 팀을 정함)
     if not is_super() then
         if v_ag.team_id is null then raise exception '이 실행기는 아직 팀이 없어요. 총관리자가 먼저 팀을 정해야 해요.'; end if;
-        if not is_team_admin(v_ag.team_id) then raise exception '다른 팀 실행기예요.'; end if;
+        if not _can_link(v_ag.team_id) then raise exception '다른 팀 실행기예요 (또는 실행기 연결 권한이 없어요).'; end if;
     end if;
-    if v_ag.pc_id is not null and not is_team_admin(_pc_team(v_ag.pc_id)) then
+    if v_ag.pc_id is not null and not _can_link(_pc_team(v_ag.pc_id)) then
         raise exception '이 실행기는 다른 팀 컴퓨터에 연결돼 있어요.';
     end if;
     if p_pc is not null then
         v_team := _pc_team(p_pc);
         if v_team is null then raise exception '없는 컴퓨터예요.'; end if;
-        if not is_team_admin(v_team) then raise exception '이 팀 관리자만 연결할 수 있어요.'; end if;
+        if not _can_link(v_team) then raise exception '이 팀 관리자나 실행기 연결 권한이 있는 사람만 연결할 수 있어요.'; end if;
         update agents set pc_id = null where pc_id = p_pc and user_id <> p_agent;  -- 예전 실행기는 연결 끊음
     elsif not (is_super() or (coalesce(v_ag.team_id, _pc_team(v_ag.pc_id)) is not null
-                              and is_team_admin(coalesce(v_ag.team_id, _pc_team(v_ag.pc_id))))) then
+                              and _can_link(coalesce(v_ag.team_id, _pc_team(v_ag.pc_id))))) then
         raise exception '관리자만 할 수 있어요.';
     end if;
     if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
@@ -1419,7 +1430,7 @@ begin
     select * into v_ag from agents where user_id = p_agent;
     if not found then return; end if;
     if v_ag.pc_id is not null then raise exception '컴퓨터에 연결된 실행기는 먼저 연결을 끊으세요.'; end if;
-    if not (is_super() or (v_ag.team_id is not null and is_team_admin(v_ag.team_id))) then
+    if not (is_super() or (v_ag.team_id is not null and _can_link(v_ag.team_id))) then
         raise exception '관리자만 할 수 있어요.';
     end if;
     delete from agents where user_id = p_agent;
@@ -1502,7 +1513,7 @@ begin
     select * into v_ag from agents where user_id = p_agent;
     if not found then raise exception '없는 실행기예요. 새로고침하세요.'; end if;
     if v_ag.pc_id is not null then raise exception '연결된 실행기는 위 표에서 체크하고 [실행기 다시 켜기]를 누르세요.'; end if;
-    if not (is_super() or (v_ag.team_id is not null and is_team_admin(v_ag.team_id))) then
+    if not (is_super() or (v_ag.team_id is not null and _can_link(v_ag.team_id))) then
         raise exception '이 팀 관리자만 할 수 있어요.';
     end if;
     update agents set poke = 'restart_agent' where user_id = p_agent;
@@ -1515,7 +1526,7 @@ language plpgsql security definer set search_path = public as $$
 declare v text := _norm_mac(p_mac);
 begin
     if _pc_team(p_pc) is null then raise exception '없는 컴퓨터예요.'; end if;
-    if not is_team_admin(_pc_team(p_pc)) then raise exception '이 팀 관리자만 할 수 있어요.'; end if;
+    if not _can_link(_pc_team(p_pc)) then raise exception '이 팀 관리자나 실행기 연결 권한이 있는 사람만 할 수 있어요.'; end if;
     if coalesce(trim(p_mac), '') <> '' and v = '' then raise exception 'MAC 주소 형식이 잘못됐어요 (예: 00-1A-2B-3C-4D-5E).'; end if;
     if v <> '' then
         update pcs set mac = '' where mac = v and id <> p_pc;
@@ -1539,7 +1550,7 @@ end $$;
 create or replace function public.set_pc_creds(p_pc bigint, p_slot integer, p_sealed text, p_fp text) returns void
 language plpgsql security definer set search_path = public as $$
 begin
-    if not (_can_control(p_pc) or is_team_admin(_pc_team(p_pc))) then raise exception 'PC 조종 권한이 없어요.'; end if;
+    if not (_can_control(p_pc) or _can_link(_pc_team(p_pc))) then raise exception 'PC 조종 권한이 없어요.'; end if;
     if coalesce(p_sealed, '') = '' then
         delete from pc_creds where pc_id = p_pc and slot = p_slot;
     else
@@ -1615,5 +1626,5 @@ grant execute on function
     public.new_join_code(bigint), public.agent_join_team(text),
     public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds(),
     public._norm_mac(text), public._agent_macs(jsonb), public.set_pc_mac(bigint, text),
-    public.request_agent_restart(uuid)
+    public.request_agent_restart(uuid), public._can_link(bigint)
 to authenticated;

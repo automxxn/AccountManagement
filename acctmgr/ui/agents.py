@@ -293,7 +293,7 @@ class AgentSettingsDialog(QDialog):
         else:
             lay.addWidget(muted(f"실행기: {agent.machine} · v{agent.version} · {_ago(agent.seconds_ago)}"))
         lay.addLayout(form)
-        if agent is not None and repo.me.is_admin and not bulk:
+        if agent is not None and repo.me.can("can_link_agent") and not bulk:
             # 잘못 연결했거나 컴퓨터 자리가 바뀌었을 때: 이 실행기를 다른 컴퓨터로 옮기기
             box_m = QGroupBox("이 실행기를 다른 컴퓨터로 옮기기 (잘못 연결했거나 자리가 바뀌었을 때)")
             mrow = QHBoxLayout(box_m)
@@ -316,7 +316,7 @@ class AgentSettingsDialog(QDialog):
         lay.addWidget(self.cmd_msg)
         lay.addStretch(1)
         row = QHBoxLayout()
-        if agent is not None and repo.me.is_admin and not bulk:
+        if agent is not None and repo.me.can("can_link_agent") and not bulk:
             row.addWidget(button("연결 끊기", "danger", self._unlink, "이 실행기를 이 컴퓨터에서 떼어내요"))
         row.addStretch(1)
         box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
@@ -649,10 +649,11 @@ class AgentsTab(QWidget):
                               "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
         bar2.addWidget(button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
                               "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요"))
-        if repo.me.is_admin:
+        if repo.me.can("can_link_agent"):
             bar2.addWidget(button("선택한 컴퓨터 MAC 고정", "", self._fix_mac_checked,
                                   "체크한 컴퓨터에 지금 연결된 실행기 PC의 MAC을 고정해요. 그 뒤로 그 PC의 실행기는 "
                                   "다시 깔아도 항상 그 컴퓨터로 연결되고, 다른 PC 실행기는 그 컴퓨터로 자동 연결되지 않아요"))
+        if repo.me.is_admin or (repo.me.can("can_link_agent") and repo.me.can("can_control_pc")):
             bar2.addWidget(button("선택한 컴퓨터 실행기 초기화", "danger", self._reset_checked,
                                   "체크한 컴퓨터의 정한 클라우드를 지우고 실행기 연결을 끊어요. 실행기는 연결 대기로 돌아가요"))
         bar2.addStretch(1)
@@ -1136,7 +1137,7 @@ class AgentsTab(QWidget):
 
     def _render_pending(self) -> None:
         linked_mode = hasattr(self, "show_linked") and self.show_linked.isChecked()
-        show = self.repo.me.is_admin and (bool(self.pending) or linked_mode)
+        show = self.repo.me.can("can_link_agent") and (bool(self.pending) or linked_mode)
         self.pending_box.setVisible(show)
         if not show:
             self.pend.setRowCount(0)      # 다음에 다시 보일 때 예전 줄이 섞이지 않게
