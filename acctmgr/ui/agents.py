@@ -89,13 +89,19 @@ def cloud_number(c: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def suggest_pc(cloud: str, pcs: list, linked: set, avoid: set = frozenset()):
+def suggest_pc(cloud: str, pcs: list, linked: set, avoid: set = frozenset(), macs=()):
     """이 클라우드를 여는 실행기를 어느 컴퓨터에 연결하면 좋을지 추천. (pc, 이유) 또는 (None, '').
 
     1) 그 클라우드를 정해 둔 컴퓨터 (다른 실행기가 붙어 있어도 추천 → 바꾸기)
     2) 예전에 그 클라우드였던 컴퓨터 (초기화하기 전 값을 기억해 둔 것)
     3) 클라우드 번호와 컴퓨터 번호가 같은, 실행기 없는 컴퓨터
     """
+    macs = set(macs or ())
+    for p in pcs:
+        if p.id not in avoid and getattr(p, "mac", "") and p.mac in macs:
+            return p, "이 PC의 MAC이 고정된 컴퓨터"
+    # 다른 PC의 MAC으로 고정된 컴퓨터는 클라우드가 같아도 추천하지 않는다
+    avoid = set(avoid) | {p.id for p in pcs if getattr(p, "mac", "") and p.mac not in macs}
     cid = cloud_id(cloud)
     if cid:
         for p in pcs:
@@ -134,7 +140,9 @@ def reset_pc_launcher(repo, pc, agent: Agent | None) -> None:
         repo.set_agent_settings(pc.id, s)
         pc.agent_settings = s
     if agent is not None:
-        repo.link_agent(agent.user_id, None)
+        repo.link_agent(agent.user_id, None)      # 연결을 풀면 서버가 그 컴퓨터의 MAC 고정도 지움
+    elif getattr(pc, "mac", ""):
+        repo.set_pc_mac(pc.id, "")
 
 
 def kind_label(kind: str, arg: str = "") -> str:
@@ -636,6 +644,9 @@ class AgentsTab(QWidget):
         bar2.addWidget(button("컴퓨터별 클라우드 정하기", "primary", self._clouds,
                               "컴퓨터마다 LD 클라우드를 목록에서 골라요. 그 클라우드를 여는 실행기가 켜지면 자동으로 연결돼요"))
         if repo.me.is_admin:
+            bar2.addWidget(button("선택한 컴퓨터 MAC 고정", "", self._fix_mac_checked,
+                                  "체크한 컴퓨터에 지금 연결된 실행기 PC의 MAC을 고정해요. 그 뒤로 그 PC의 실행기는 "
+                                  "다시 깔아도 항상 그 컴퓨터로 연결되고, 다른 PC 실행기는 그 컴퓨터로 자동 연결되지 않아요"))
             bar2.addWidget(button("선택한 컴퓨터 실행기 초기화", "danger", self._reset_checked,
                                   "체크한 컴퓨터의 정한 클라우드를 지우고 실행기 연결을 끊어요. 실행기는 연결 대기로 돌아가요"))
         bar2.addStretch(1)
@@ -680,7 +691,13 @@ class AgentsTab(QWidget):
         self.pending_box = QWidget()
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
-        pl.addWidget(QLabel("<b>연결 대기 실행기</b> — 새로 설치되거나 업데이트된 실행기예요. 어느 컴퓨터인지 골라 [연결]을 누르세요."))
+        ph = QHBoxLayout()
+        ph.addWidget(QLabel("<b>연결 대기 실행기</b> — 어느 컴퓨터인지 골라 [연결]을 누르면 그 PC의 MAC이 그 컴퓨터에 고정돼요."))
+        ph.addStretch(1)
+        self.show_linked = QCheckBox("연결된 실행기도 같이 보기 (어디에 붙어 있는지 확인·옮기기)")
+        self.show_linked.toggled.connect(lambda _on: self._redraw_pending())
+        ph.addWidget(self.show_linked)
+        pl.addLayout(ph)
         if repo.me.is_super:
             tb = QHBoxLayout()
             self.pend_all = QCheckBox("전체 선택")
@@ -700,7 +717,7 @@ class AgentsTab(QWidget):
             tb.addStretch(1)
             pl.addLayout(tb)
         self.pend = QTableWidget(0, 8)
-        self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "그 PC가 여는 클라우드", "마지막 연락",
+        self.pend.setHorizontalHeaderLabels(["MAC · PC 이름 (윈도우)", "버전", "그 PC가 여는 클라우드", "마지막 연락",
                                              "연결할 컴퓨터 (눌러서 고르기)", "", "팀", "선택"])
         self.pend.setColumnHidden(6, not repo.me.is_super)
         self.pend.setColumnHidden(7, not repo.me.is_super)
@@ -771,6 +788,12 @@ class AgentsTab(QWidget):
         tid = getattr(self.repo, "team_id", None)
         self.pending = [a for a in agents if a.pc_id is None
                         and (a.team_id == tid or (a.team_id is None and self.repo.me.is_super))]
+        if getattr(self, "show_linked", None) is not None and self.show_linked.isChecked():
+            # 연결된 실행기도: 이 팀 컴퓨터에 붙은 것 (총관리자는 다른 팀 컴퓨터에 붙은 것까지)
+            no = {p.id: p.no for p in self.pcs}
+            linked = [a for a in agents if a.pc_id is not None and (a.pc_id in mine or self.repo.me.is_super)]
+            linked.sort(key=lambda a: (a.pc_id not in no, no.get(a.pc_id, 0), a.machine))
+            self.pending = self.pending + linked
         self.commands = {}
         for c in cmds:
             self.commands.setdefault(c["pc_id"], []).append(c)
@@ -799,8 +822,11 @@ class AgentsTab(QWidget):
             t.setItem(r, 2, _item(pc.name))
             ag = self.agents.get(pc.id)
             if ag is None:
-                st = _item("실행기 없음")
+                st = _item("실행기 없음" + (f"\nMAC {pc.mac} 기다리는 중" if pc.mac else ""))
                 st.setForeground(gray)
+                if pc.mac:
+                    st.setToolTip(f"이 컴퓨터는 MAC {pc.mac} 실행기로 고정돼 있어요. 그 PC에서 실행기가 켜지면 자동으로 연결돼요.\n"
+                                  "다른 PC로 바꾸려면 연결 대기에서 그 실행기를 이 컴퓨터에 [연결]하세요.")
                 now = _item("")
                 team = _item("-")
                 team.setForeground(gray)
@@ -808,9 +834,14 @@ class AgentsTab(QWidget):
                 team = self._team_cell(ag, red)
                 live = (ag.state or {}).get("realtime")
                 speed = "" if not ag.online or live is None else ("  · 즉시" if live else "  · 20초마다")
-                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed + f"\n{ag.machine}")
+                st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed
+                           + "\n" + self._mac_line(ag, pc))
                 st.setForeground(green if ag.online else gray)
-                tip = f"Windows PC 이름: {ag.machine}\n실행기 버전: v{ag.version}"
+                tip = (f"MAC: {ag.mac or '(모름 — 예전 실행기. 다시 켜면 새 버전이 알려 줘요)'}\n"
+                       + ("이 컴퓨터에 MAC 고정됨: 이 PC 실행기는 다시 깔아도 항상 이 컴퓨터로 연결돼요"
+                          if pc.mac and pc.mac in ag.macs else
+                          "아직 MAC이 고정되지 않았어요. 맞는 PC면 체크하고 [선택한 컴퓨터 MAC 고정]")
+                       + f"\nWindows PC 이름: {ag.machine}\n실행기 버전: v{ag.version}")
                 if live is not None:
                     tip += "\n" + ("실시간 연결됨: 명령이 바로 전달돼요" if live else
                                     "실시간 연결이 안 돼서 20초마다 명령을 확인해요 (실행기 다시 켜기로 다시 시도)")
@@ -844,6 +875,14 @@ class AgentsTab(QWidget):
         self._render_pending()
         self._render_history()
         self.restyle()
+
+    @staticmethod
+    def _mac_line(ag: Agent, pc=None) -> str:
+        if not ag.mac:
+            return f"{ag.machine} (예전 실행기 · MAC 모름)"
+        if pc is None:
+            return ag.mac
+        return ag.mac + ("  · 고정" if pc.mac and pc.mac in ag.macs else "  · MAC 미확인")
 
     def _team_cell(self, ag: Agent, red: QColor) -> QTableWidgetItem:
         """연결된 실행기가 어느 팀으로 등록돼 있는지 + 그 팀의 지금 실행 코드."""
@@ -932,6 +971,38 @@ class AgentsTab(QWidget):
         self._tick()
         if errors:
             QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
+
+    def _fix_mac_checked(self) -> None:
+        targets = [p for p in self.pcs if p.id in self.checked]
+        if not targets:
+            QMessageBox.information(self, "MAC 고정", "MAC을 고정할 컴퓨터를 체크하세요.")
+            return
+        ok = [(p, self.agents[p.id]) for p in targets if p.id in self.agents and self.agents[p.id].mac]
+        skip = [p for p in targets if not (p.id in self.agents and self.agents[p.id].mac)]
+        if not ok:
+            QMessageBox.information(self, "MAC 고정", "체크한 컴퓨터에 MAC을 알려 준 실행기가 없어요.\n"
+                                    "실행기가 없거나 예전 실행기예요. 예전 실행기는 [실행기 다시 켜기]를 누르면 새 버전으로 바뀌어요.")
+            return
+        lines = "\n".join(f"  {p.no}. {p.name} ← {a.mac} ({a.machine})" for p, a in ok[:20])
+        if len(ok) > 20:
+            lines += f"\n  외 {len(ok) - 20}대"
+        if skip:
+            lines += "\n\n빼는 컴퓨터 (실행기 없음 또는 예전 실행기): " + ", ".join(str(p.no) for p in skip[:30])
+        if QMessageBox.question(
+                self, "MAC 고정",
+                f"{len(ok)}대를 지금 연결된 실행기 PC의 MAC으로 고정할까요?\n\n{lines}\n\n"
+                "그 PC 앞에서 실행기 창 둘째 줄의 MAC과 번호가 맞는지 먼저 확인하세요.") != QMessageBox.Yes:
+            return
+        errors = []
+        for p, a in ok:
+            try:
+                self.repo.set_pc_mac(p.id, a.mac)
+            except RepoError as e:
+                errors.append(f"{p.no}. {p.name}: {e}")
+        self.refresh()
+        self._say(f"MAC 고정: {len(ok) - len(errors)}대")
+        if errors:
+            QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
 
     def _reset_checked(self) -> None:
         targets = [p for p in self.pcs if p.id in self.checked]
@@ -1022,14 +1093,15 @@ class AgentsTab(QWidget):
             self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
     def _render_pending(self) -> None:
-        show = self.repo.me.is_admin and bool(self.pending)
+        linked_mode = hasattr(self, "show_linked") and self.show_linked.isChecked()
+        show = self.repo.me.is_admin and (bool(self.pending) or linked_mode)
         self.pending_box.setVisible(show)
         if not show:
             self.pend.setRowCount(0)      # 다음에 다시 보일 때 예전 줄이 섞이지 않게
             self._pending_key = None
             return
         taken = set(self.agents)
-        key = (tuple(a.user_id for a in self.pending), tuple(p.id for p in self.pcs), tuple(sorted(taken)))
+        key = (tuple((a.user_id, a.pc_id) for a in self.pending), tuple((p.id, p.mac) for p in self.pcs), tuple(sorted(taken)))
         if key != self._pending_key and self._picking():
             # 컴퓨터를 고르는 중(목록이 열려 있거나 그 칸을 누른 상태)이면 다 고를 때까지 새로 만들지 않는다
             return
@@ -1049,19 +1121,34 @@ class AgentsTab(QWidget):
             self.bulk_team.setCurrentIndex(max(i, 0))
         self.pend.setRowCount(len(self.pending))
         same_pc = {a.machine: p for p, a in self.agents.items()}
+        same_mac = {m: p for p, a in self.agents.items() for m in a.macs}
         pc_label = {p.id: f"{p.no}. {p.name}" for p in self.pcs}
         for r, ag in enumerate(self.pending):
-            mc = _item(ag.machine)
+            head = ag.mac or "MAC 모름 (예전 실행기)"
+            mc = _item(f"{head}\n{ag.machine}")
+            mc.setToolTip(f"MAC: {ag.mac or '모름'}\nWindows PC 이름: {ag.machine}\n"
+                          "실행기 창 둘째 줄에도 같은 MAC이 보여요. 그 PC 앞에서 맞는지 확인하세요.")
             gone = self.displaced.get(ag.user_id)
-            if gone is not None:
-                mc = _item(f"{ag.machine}\n({pc_label.get(gone, '?')}에서 풀림)")
+            dup = next((same_mac[m] for m in ag.macs if m in same_mac and same_mac[m] != ag.pc_id), None)
+            if ag.pc_id is not None:
+                where = pc_label.get(ag.pc_id, "다른 팀 컴퓨터")
+                mc = _item(f"{head}\n{ag.machine} · 지금 {where}")
+                pcx = next((p for p in self.pcs if p.id == ag.pc_id), None)
+                fixed = pcx is not None and pcx.mac and pcx.mac in ag.macs
+                mc.setToolTip(f"지금 {where}에 연결돼 있어요" + (" (MAC 고정됨)" if fixed else " (MAC 미확인)")
+                              + ".\n다른 컴퓨터를 골라 [연결]하면 옮겨지고, 같은 컴퓨터로 [연결]하면 MAC이 고정돼요.")
+                if not fixed:
+                    mc.setForeground(QColor("#D97706"))
+            elif gone is not None:
+                mc = _item(f"{head}\n{ag.machine} ({pc_label.get(gone, '?')}에서 풀림)")
                 mc.setForeground(QColor("#D97706"))
                 mc.setToolTip("방금 다른 실행기로 바꾸면서 연결이 풀린 실행기예요. 이 실행기가 원래 있어야 할 컴퓨터를 고르세요.\n"
                               "'그 PC가 여는 클라우드'는 풀리기 전 컴퓨터 설정에서 받은 값이라 맞지 않을 수 있어요.")
-            elif ag.machine in same_pc:
-                mc = _item(f"{ag.machine}\n(같은 이름이 {pc_label.get(same_pc[ag.machine], '?')}에 연결됨)")
+            elif dup is not None or (not ag.mac and ag.machine in same_pc):
+                where = pc_label.get(dup if dup is not None else same_pc[ag.machine], "?")
+                mc = _item(f"{head}\n{ag.machine} (같은 PC가 {where}에 연결됨)")
                 mc.setForeground(QColor("#D97706"))
-                mc.setToolTip("같은 Windows PC 이름의 실행기가 이미 다른 컴퓨터 자리에 연결돼 있어요.\n"
+                mc.setToolTip("같은 PC(같은 MAC 또는 같은 Windows 이름)의 실행기가 이미 다른 컴퓨터 자리에 연결돼 있어요.\n"
                               "같은 PC에서 실행기를 두 번(다른 폴더에서) 켰거나 다시 설치했을 수 있어요. "
                               "쓰지 않는 쪽은 [지우기]로 지우세요.")
             self.pend.setItem(r, 0, mc)
@@ -1078,11 +1165,15 @@ class AgentsTab(QWidget):
             combo.addItem("컴퓨터 고르기...", None)
             for p in self.pcs:
                 chosen_cloud = ((p.agent_settings or {}).get("cloud") or "").split(" #")[0]
-                combo.addItem(f"{p.no}. {p.name}" + (f"  · {chosen_cloud}" if chosen_cloud else "")
-                              + ("  (실행기 있음 → 바꾸기)" if p.id in taken else ""), p.id)
+                note = ("  (지금 연결)" if p.id == ag.pc_id else
+                        "  (실행기 있음 → 바꾸기)" if p.id in taken else
+                        "  (다른 MAC 고정)" if p.mac and p.mac not in ag.macs else "")
+                combo.addItem(f"{p.no}. {p.name}" + (f"  · {chosen_cloud}" if chosen_cloud else "") + note, p.id)
             wheel_only_when_focused(combo)  # 지나가다 휠을 굴려도 바뀌지 않게
             chosen = self.pending_choice.get(ag.user_id)
             idx = combo.findData(chosen) if chosen is not None else -1
+            if idx < 0 and ag.pc_id is not None:
+                idx = combo.findData(ag.pc_id)
             if idx < 0:
                 idx = self._guess_index(ag, combo, taken)
             combo.setCurrentIndex(idx)
@@ -1092,13 +1183,20 @@ class AgentsTab(QWidget):
             w = QWidget()
             l = QHBoxLayout(w)
             l.setContentsMargins(4, 2, 4, 2)
-            l.addWidget(button("연결", "primary", lambda _=False, a=ag, c=combo: self._link(a, c)))
-            l.addWidget(button("추천 다시", "", lambda _=False, a=ag, c=combo: self._reguess(a, c),
-                               "그 PC 실행기가 알려 준 LD 클라우드로 맞는 컴퓨터를 다시 골라요"))
-            l.addWidget(button("지우기", "", lambda _=False, a=ag: self._forget(a), "잘못 등록된 실행기를 목록에서 지워요"))
+            l.addWidget(button("연결", "primary", lambda _=False, a=ag, c=combo: self._link(a, c),
+                               "고른 컴퓨터에 연결하고 이 PC의 MAC을 그 컴퓨터에 고정해요"))
+            if ag.pc_id is None:
+                l.addWidget(button("추천 다시", "", lambda _=False, a=ag, c=combo: self._reguess(a, c),
+                                   "MAC이나 그 PC 실행기가 알려 준 LD 클라우드로 맞는 컴퓨터를 다시 골라요"))
+                l.addWidget(button("지우기", "", lambda _=False, a=ag: self._forget(a), "잘못 등록된 실행기를 목록에서 지워요"))
             l.addStretch(1)
             self.pend.setCellWidget(r, 5, w)
-            if self.repo.me.is_super:
+            if self.repo.me.is_super and ag.pc_id is not None:
+                tn = next((t.name for t in self.repo.teams if t.id == ag.team_id), "")
+                self.pend.setItem(r, 6, _item(tn))
+                self.pend.removeCellWidget(r, 6)
+                self.pend.removeCellWidget(r, 7)
+            elif self.repo.me.is_super:
                 ck = QCheckBox()
                 ck.setChecked(ag.user_id in self.pend_checked)
                 ck.toggled.connect(lambda on, a=ag: (self.pend_checked.add if on else self.pend_checked.discard)(a.user_id))
@@ -1117,7 +1215,7 @@ class AgentsTab(QWidget):
                 wheel_only_when_focused(tc)
                 tc.activated.connect(lambda _i, a=ag, c=tc: self._set_team(a, c.currentData()))
                 self.pend.setCellWidget(r, 6, tc)
-        self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
+        self.pend.setFixedHeight(px(40) * min(max(len(self.pending), 1), 8 if linked_mode else 4) + px(44))
 
     def _picking(self) -> bool:
         """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있을 때만.
@@ -1144,13 +1242,13 @@ class AgentsTab(QWidget):
         self._suggest, self._why = {}, {}
         used = set()
         # 확실한 것(정해 둔 클라우드)부터 정하도록: 그런 컴퓨터가 있는 실행기를 먼저
-        order = sorted(self.pending, key=lambda a: 0 if any(
+        order = sorted([a for a in self.pending if a.pc_id is None], key=lambda a: 0 if any(
             cloud_id((p.agent_settings or {}).get("cloud")) == cloud_id((a.state.get("cfg") or {}).get("cloud"))
             for p in self.pcs) else 1)
         for ag in order:
             gone = self.displaced.get(ag.user_id)
             pc, why = suggest_pc((ag.state.get("cfg") or {}).get("cloud") or "", self.pcs, taken,
-                                 used | ({gone} if gone is not None else set()))
+                                 used | ({gone} if gone is not None else set()), ag.macs)
             if pc is not None:
                 used.add(pc.id)
                 self._suggest[ag.user_id] = pc.id
@@ -1174,8 +1272,20 @@ class AgentsTab(QWidget):
         if pid is None:
             QMessageBox.information(self, "연결", "연결할 컴퓨터를 고르세요.")
             return
-        if pid in self.agents and QMessageBox.question(
+        target = next((p for p in self.pcs if p.id == pid), None)
+        if pid == ag.pc_id:
+            if target is not None and target.mac and target.mac in ag.macs:
+                QMessageBox.information(self, "연결", "이미 이 컴퓨터에 연결돼 있고 MAC도 고정돼 있어요.")
+                return
+            if not ag.mac:
+                QMessageBox.information(self, "연결", "예전 실행기라 MAC을 몰라요. [실행기 다시 켜기]로 새 버전이 되면 MAC을 고정할 수 있어요.")
+                return
+        elif pid in self.agents and QMessageBox.question(
                 self, "연결", "이 컴퓨터에는 이미 실행기가 있어요. 새 실행기로 바꿀까요?") != QMessageBox.Yes:
+            return
+        elif ag.pc_id is not None and QMessageBox.question(
+                self, "연결", f"이 실행기는 지금 다른 컴퓨터에 연결돼 있어요. {target.no if target else ''}번으로 옮길까요?\n"
+                "(원래 컴퓨터는 실행기 없음이 되고, 그 컴퓨터의 MAC 고정도 풀려요)") != QMessageBox.Yes:
             return
         old = self.agents.get(pid)
         if run_safely(self, self.repo.link_agent, ag.user_id, pid):
@@ -1192,7 +1302,8 @@ class AgentsTab(QWidget):
                 pass
             self._redraw_pending()
             pc = next((p for p in self.pcs if p.id == pid), None)
-            msg = f"연결했어요: {ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요."
+            msg = (f"연결했어요: {ag.mac or ag.machine} → {pc.no}. {pc.name}" if pc else "연결했어요.") + (
+                " (MAC 고정)" if ag.mac else "")
             if old is not None and old.user_id != ag.user_id:
                 msg += (f"\n\n원래 이 컴퓨터에 있던 실행기({old.machine})는 연결이 풀려서 연결 대기 목록으로 옮겼어요. "
                         "그 실행기가 원래 있어야 할 컴퓨터를 골라 연결하세요. (주황색으로 표시돼요)")
@@ -1200,11 +1311,11 @@ class AgentsTab(QWidget):
             self._say(msg.split("\n")[0])
 
     def _pend_check_all(self, on: bool) -> None:
-        self.pend_checked = {a.user_id for a in self.pending} if on else set()
+        self.pend_checked = {a.user_id for a in self.pending if a.pc_id is None} if on else set()
         self._redraw_pending()
 
     def _bulk_team(self) -> None:
-        chosen = [a for a in self.pending if a.user_id in self.pend_checked]
+        chosen = [a for a in self.pending if a.user_id in self.pend_checked and a.pc_id is None]
         if not chosen:
             QMessageBox.information(self, "팀 정하기", "팀을 정할 실행기를 체크하세요 (오른쪽 '선택' 칸).")
             return

@@ -1085,6 +1085,9 @@ alter table public.agents add column if not exists team_id bigint references pub
 
 -- 실행기 설정 (열 클라우드, 재시작 옵션, 단축키 등). 작업장 프로그램에서만 바꾼다
 alter table public.pcs add column if not exists agent_settings jsonb not null default '{}'::jsonb;
+-- 실행기 MAC 고정: 실행기를 이 컴퓨터에 연결(=확인)하면 그 PC의 MAC 주소가 저장되고,
+-- 그 뒤로 그 MAC의 실행기는 (다시 깔아도) 항상 이 컴퓨터로 연결된다. '' = 아직 안 정함
+alter table public.pcs add column if not exists mac text not null default '';
 
 create table if not exists public.pc_creds (
     pc_id        bigint not null references public.pcs(id) on delete cascade,
@@ -1136,6 +1139,25 @@ language sql immutable as $$
         select _cloud_id(d) as x from jsonb_array_elements_text(
             case when jsonb_typeof(coalesce(p_devices, '[]'::jsonb)) = 'array' then p_devices else '[]'::jsonb end) d
         union all select _cloud_id(p_cloud)) t
+$$;
+
+-- MAC 주소 표기 맞추기: 'aa:bb:cc:dd:ee:ff' → 'AA-BB-CC-DD-EE-FF' (12자리 16진수가 아니면 '')
+create or replace function public._norm_mac(m text) returns text
+language sql immutable as $$
+    select case when length(x) = 12 then substr(x, 1, 2) || '-' || substr(x, 3, 2) || '-' || substr(x, 5, 2) || '-'
+                                         || substr(x, 7, 2) || '-' || substr(x, 9, 2) || '-' || substr(x, 11, 2)
+                else '' end
+      from (select upper(regexp_replace(coalesce(m, ''), '[^0-9A-Fa-f]', '', 'g')) as x) t
+$$;
+
+-- 실행기가 알려 준 이 PC의 MAC들 (대표 + 랜카드/와이파이 전부)
+create or replace function public._agent_macs(p_state jsonb) returns text[]
+language sql immutable as $$
+    select coalesce(array_agg(distinct m) filter (where m <> ''), '{}'::text[]) from (
+        select _norm_mac(p_state ->> 'mac') as m
+        union all
+        select _norm_mac(x) from jsonb_array_elements_text(
+            case when jsonb_typeof(p_state -> 'macs') = 'array' then p_state -> 'macs' else '[]'::jsonb end) x) t
 $$;
 
 -- 이 실행기(로그인한 agent)가 연결된 컴퓨터
@@ -1204,6 +1226,8 @@ declare
     v_changed bigint;
     v_ids     text[];
     v_teams   bigint[];
+    v_macs    text[];
+    v_mpc     bigint;
 begin
     if my_role() is distinct from 'agent' then raise exception 'PC 실행기 계정만 할 수 있어요.'; end if;
     update agents set last_seen = now(), state = coalesce(p_state, state),
@@ -1213,6 +1237,27 @@ begin
     if not found then raise exception '먼저 등록해야 해요.'; end if;
     v_cloud := v_ag.state -> 'cfg' ->> 'cloud';
     v_cid := _cloud_id(v_cloud);
+    -- MAC 고정이 가장 먼저: 이 PC의 MAC이 저장된 컴퓨터가 있으면 그 컴퓨터로 (지금 다른 곳에 붙어 있어도 옮김).
+    -- 단, 같은 MAC의 다른 실행기(같은 PC에서 두 번 등록)가 이미 켜진 채 붙어 있으면 그대로 둔다 (서로 뺏지 않게)
+    v_macs := _agent_macs(v_ag.state);
+    if cardinality(v_macs) > 0 then
+        select id into v_mpc from pcs where mac <> '' and mac = any (v_macs) order by id limit 1;
+        if v_mpc is not null and v_ag.pc_id is distinct from v_mpc
+           and not exists (select 1 from agents o where o.pc_id = v_mpc and o.user_id <> v_ag.user_id
+                           and _agent_macs(o.state) && v_macs and o.last_seen > now() - interval '3 minutes') then
+            update agents set pc_id = null where pc_id = v_mpc and user_id <> v_ag.user_id;  -- MAC 다른 실행기는 연결 대기로
+            delete from pc_creds where pc_id = v_mpc;
+            if v_ag.pc_id is not null then
+                delete from pc_creds where pc_id = v_ag.pc_id;
+                update pcs set ld_cloud = '', updated_at = now() where id = v_ag.pc_id;
+            end if;
+            update agents set pc_id = v_mpc, team_id = _pc_team(v_mpc) where user_id = v_ag.user_id;
+            perform _log('실행기 자동 연결 (MAC)', v_ag.machine || ' → ' || _pc_no_label(v_mpc)
+                         || ' (MAC ' || (select mac from pcs where id = v_mpc) || ')', _pc_team(v_mpc));
+            v_ag.pc_id := v_mpc;
+            v_ag.team_id := _pc_team(v_mpc);
+        end if;
+    end if;
     -- 팀이 아직 없으면 추측: 이 실행기의 LD 클라우드들이 어느 팀 컴퓨터(정한 클라우드/예전 클라우드)나
     -- 그 팀에 연결된 다른 실행기의 LD 목록과 겹치는지. 딱 한 팀일 때만 정한다 (아니면 총관리자가 정함)
     if v_ag.pc_id is null and v_ag.team_id is null then
@@ -1236,6 +1281,7 @@ begin
     -- 같은 클라우드를 여는 다른 연결 대기 실행기도 없으면 그 컴퓨터에 연결한다
     if v_ag.pc_id is null and v_cid is not null then
         select array_agg(id) into v_cands from pcs where _cloud_id(agent_settings ->> 'cloud') = v_cid
+            and mac = ''          -- MAC이 정해진 컴퓨터는 MAC이 같은 실행기만
             and (v_ag.team_id is null or team_id = v_ag.team_id);
         if cardinality(v_cands) = 1
            and not exists (select 1 from agents where pc_id = v_cands[1])
@@ -1320,6 +1366,20 @@ begin
     if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
     if p_pc is not null then delete from pc_creds where pc_id = p_pc; end if;
     update agents set pc_id = p_pc, team_id = coalesce(v_team, team_id) where user_id = p_agent;
+    -- MAC 고정: 연결 = 이 실행기가 이 컴퓨터가 맞다는 확인. 그 PC의 MAC을 저장 (다른 컴퓨터에 있던 같은 MAC은 지움).
+    -- 연결을 풀면 떠나는 컴퓨터의 MAC도 지운다 (안 그러면 바로 다시 자동 연결됨)
+    if v_ag.pc_id is not null and v_ag.pc_id is distinct from p_pc then
+        update pcs set mac = '' where id = v_ag.pc_id;
+    end if;
+    if p_pc is not null then
+        if cardinality(_agent_macs(v_ag.state)) > 0 then
+            update pcs set mac = '' where mac = any (_agent_macs(v_ag.state)) and id <> p_pc;
+            update pcs set mac = coalesce(nullif(_norm_mac(v_ag.state ->> 'mac'), ''), (_agent_macs(v_ag.state))[1])
+             where id = p_pc;
+        else
+            update pcs set mac = '' where id = p_pc;   -- MAC을 모르는 예전 실행기: 다른 PC의 MAC이 남아 있지 않게
+        end if;
+    end if;
     -- 작업장 LD클라우드 칸은 실행기가 여는 클라우드만 보여준다: 떠나는 컴퓨터는 비우고, 새 컴퓨터는 그 실행기 값으로
     if v_ag.pc_id is not null and v_ag.pc_id is distinct from p_pc then
         update pcs set ld_cloud = '', updated_at = now() where id = v_ag.pc_id;
@@ -1422,6 +1482,22 @@ begin
     return v_id;
 end $$;
 
+-- PC 조종: 컴퓨터의 MAC 고정/지우기 (p_mac = '' 이면 지움)
+create or replace function public.set_pc_mac(p_pc bigint, p_mac text) returns void
+language plpgsql security definer set search_path = public as $$
+declare v text := _norm_mac(p_mac);
+begin
+    if _pc_team(p_pc) is null then raise exception '없는 컴퓨터예요.'; end if;
+    if not is_team_admin(_pc_team(p_pc)) then raise exception '이 팀 관리자만 할 수 있어요.'; end if;
+    if coalesce(trim(p_mac), '') <> '' and v = '' then raise exception 'MAC 주소 형식이 잘못됐어요 (예: 00-1A-2B-3C-4D-5E).'; end if;
+    if v <> '' then
+        update pcs set mac = '' where mac = v and id <> p_pc;
+    end if;
+    update pcs set mac = v, updated_at = now() where id = p_pc;
+    perform _log(case when v = '' then '실행기 MAC 지움' else '실행기 MAC 고정' end,
+                 _pc_no_label(p_pc) || case when v <> '' then ' = ' || v else '' end, _pc_team(p_pc));
+end $$;
+
 -- PC 조종: 실행기 설정 바꾸기
 create or replace function public.set_agent_settings(p_pc bigint, p jsonb) returns void
 language plpgsql security definer set search_path = public as $$
@@ -1510,5 +1586,6 @@ grant execute on function
     public.link_agent(uuid, bigint), public.forget_agent(uuid), public.send_pc_command(bigint, text, text),
     public.set_agent_team(uuid, bigint), public._agent_cloud_ids(jsonb, text),
     public.new_join_code(bigint), public.agent_join_team(text),
-    public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds()
+    public.set_agent_settings(bigint, jsonb), public.set_pc_creds(bigint, integer, text, text), public.agent_creds(),
+    public._norm_mac(text), public._agent_macs(jsonb), public.set_pc_mac(bigint, text)
 to authenticated;

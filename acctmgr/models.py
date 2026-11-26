@@ -236,6 +236,7 @@ class PC:
     worker_id: str | None = None  # 담당 근무자 (클라우드)
     slots: list[int | None] = field(default_factory=list)  # 자리별 account id
     agent_settings: dict = field(default_factory=dict)  # LD CLOUD 실행기 설정 (클라우드)
+    mac: str = ""          # 이 컴퓨터로 고정된 실행기 PC의 MAC ('' = 아직 안 정함)
 
     def title(self) -> str:
         return f"{self.no}. {self.name}".strip()
@@ -351,6 +352,26 @@ class Agent:
     @property
     def online(self) -> bool:
         return self.seconds_ago is not None and self.seconds_ago < ONLINE_SECONDS
+
+    @property
+    def mac(self) -> str:
+        """실행기가 알려 준 그 PC의 대표 MAC ('' = 예전 실행기라 모름)."""
+        return norm_mac((self.state or {}).get("mac"))
+
+    @property
+    def macs(self) -> list[str]:
+        out = [self.mac] if self.mac else []
+        for m in (self.state or {}).get("macs") or []:
+            m = norm_mac(m)
+            if m and m not in out:
+                out.append(m)
+        return out
+
+
+def norm_mac(m) -> str:
+    """'aa:bb:cc:dd:ee:ff' → 'AA-BB-CC-DD-EE-FF' (아니면 '')."""
+    x = "".join(c for c in str(m or "").upper() if c in "0123456789ABCDEF")
+    return "-".join(x[i:i + 2] for i in range(0, 12, 2)) if len(x) == 12 else ""
 
 
 def launcher_type(provider: str) -> str:

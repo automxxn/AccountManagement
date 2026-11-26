@@ -413,7 +413,7 @@ class CloudRepository:
                               anydesk_id=r["anydesk_id"], anydesk_pw=self._dec(r["anydesk_pw"]), vpn=r["vpn"],
                               ld_cloud=r["ld_cloud"], slot_count=r["slot_count"], note=r["note"],
                               version=r["version"], worker_id=r["worker_id"], slots=[None] * r["slot_count"],
-                              agent_settings=r.get("agent_settings") or {})
+                              agent_settings=r.get("agent_settings") or {}, mac=r.get("mac") or "")
         for r in self._get("assignments", {"select": "pc_id,slot,account_id"}):
             p = pcs.get(r["pc_id"])
             if p and 1 <= r["slot"] <= len(p.slots):
@@ -582,6 +582,10 @@ class CloudRepository:
             for k in ("created_at", "started_at", "finished_at"):
                 r[k] = _local_time(r.get(k))
         return rows
+
+    def set_pc_mac(self, pc_id: int, mac: str) -> None:
+        """컴퓨터에 실행기 MAC 고정 ('' = 지움)."""
+        self._rpc("set_pc_mac", {"p_pc": pc_id, "p_mac": mac or ""})
 
     def set_agent_settings(self, pc_id: int, settings: dict) -> None:
         self._rpc("set_agent_settings", {"p_pc": pc_id, "p": settings})
