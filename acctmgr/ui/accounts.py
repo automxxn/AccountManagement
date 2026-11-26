@@ -242,8 +242,9 @@ class AccountsTab(QWidget):
                     nick(mr), mr[0].lj if mr else "", nick(pl), pl[0].lj if pl else "",
                     ban_text(a.mr_ban), ban_text(a.pl_ban),
                     a.location.text() if a.location else "",
-                    self.worker_names.get(a.worker_id, "") if a.worker_id else "",
-        a.note.replace("\n", " / ")]
+                    a.note.replace("\n", " / "),                                    # 비고
+                    self.worker_names.get(a.worker_id, "") if a.worker_id else ""]  # 담당 (맨 오른쪽)
+            assert len(vals) == len(COLUMNS)
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(v)
                 it.setData(Qt.UserRole, a.id)
