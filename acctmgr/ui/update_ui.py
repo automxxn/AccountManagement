@@ -37,7 +37,7 @@ def offer(parent, info: updater.UpdateInfo) -> bool:
 
     try:
         updater.install(info, progress)
-    except updater.UpdateError as e:
+    except (updater.UpdateError, OSError) as e:  # OSError: 파일이 잠겨 있는 등 예상 못 한 파일 문제
         dlg.close()
         QMessageBox.warning(parent, "업데이트 실패", f"{e}\n\n직접 받으려면: {info.page}")
         return False

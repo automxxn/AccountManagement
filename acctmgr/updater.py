@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import subprocess
+import time
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,8 +104,25 @@ def download(info: UpdateInfo, dest: Path, progress: Callable[[int, int], bool] 
     if info.sha256 and h.hexdigest() != info.sha256:
         tmp.unlink(missing_ok=True)
         raise UpdateError("내려받은 파일이 손상됐어요(해시 불일치). 다시 시도하세요.")
-    os.replace(tmp, dest)
+    try:
+        _replace(tmp, dest)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise UpdateError("내려받은 파일을 다른 프로그램(백신 등)이 잡고 있어요. 잠시 후 다시 시도하세요.")
     return dest
+
+
+def _replace(src: Path, dst: Path, tries: int = 40, delay: float = 0.25) -> None:
+    """파일 이름 바꾸기. 막 받은 exe는 백신(Windows Defender 등)이 몇 초 동안 검사하며 잡고 있을 수 있어
+    잠깐씩 기다리며 다시 시도한다 (최대 약 10초)."""
+    for i in range(tries):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay)
 
 
 def swap(exe: Path, new_file: Path) -> None:
@@ -112,14 +130,14 @@ def swap(exe: Path, new_file: Path) -> None:
     old = exe.with_name(exe.name + ".old")
     try:
         old.unlink(missing_ok=True)
-        os.replace(exe, old)
+        _replace(exe, old)
     except PermissionError:
         new_file.unlink(missing_ok=True)
         raise UpdateError(f"'{exe.parent}' 폴더에 쓸 권한이 없어요. 프로그램을 바탕화면이나 문서 폴더로 옮겨서 실행하세요.")
     try:
-        os.replace(new_file, exe)
+        _replace(new_file, exe)
     except OSError:
-        os.replace(old, exe)  # 되돌리기
+        _replace(old, exe)  # 되돌리기
         raise UpdateError("새 파일로 바꾸지 못했어요. 다시 시도하세요.")
 
 
