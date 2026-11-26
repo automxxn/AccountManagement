@@ -4,8 +4,8 @@ from __future__ import annotations
 import copy
 import html
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -58,8 +58,7 @@ def char_line(acc: Account, compact: bool = False) -> str:
 
 class SheetDelegate(GridDelegate):
     """작업장 시트 칸 그리기 + 바로 수정.
-    - 간격 줄은 바탕색만 칠해서 컴퓨터마다 따로 떨어진 칸처럼 보이게 한다
-    - 컴퓨터 칸의 첫 줄에는 위쪽 테두리를 그린다
+    - 간격 줄은 비워 두고, 블록(컴퓨터) 안쪽 칸만 바탕을 칠한다 (테두리는 BlockTable이 그림)
     - 수정할 때는 가려진 값(암호)이 아니라 실제 값을 보여주고, 끝나면 on_commit으로 저장한다
     """
 
@@ -69,12 +68,9 @@ class SheetDelegate(GridDelegate):
 
     def paint(self, painter, option, index) -> None:
         if index.data(GAP_ROLE):
-            painter.fillRect(option.rect, QColor(T("gap")))
-            return
+            return  # 간격 줄: 아무것도 안 그림 → 페이지 바탕
+        painter.fillRect(option.rect, QColor(T("table_bg")))  # 블록 안쪽 바탕
         super().paint(painter, option, index)
-        if index.data(GROUP_START_ROLE):
-            r = option.rect
-            painter.fillRect(r.left(), r.top(), r.width(), 2, QColor(T("group_line")))
 
     def setEditorData(self, editor, index) -> None:
         real = index.data(REAL_ROLE)
@@ -83,6 +79,45 @@ class SheetDelegate(GridDelegate):
 
     def setModelData(self, editor, model, index) -> None:
         self.on_commit(index.row(), index.column(), editor.text())
+
+
+class BlockTable(QTableWidget):
+    """컴퓨터마다 둥근 테두리 블록으로 묶어 그리는 표. 열은 맨 위 제목 줄과 그대로 맞는다."""
+
+    RADIUS = 10
+
+    def __init__(self, rows: int, cols: int):
+        super().__init__(rows, cols)
+        self.blocks: list[tuple[int, int]] = []  # (첫 줄, 마지막 줄)
+        self.active_block: tuple[int, int] | None = None
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        cols = [c for c in range(self.columnCount()) if not self.isColumnHidden(c)]
+        if not cols or not self.blocks:
+            return
+        left = self.columnViewportPosition(cols[0])
+        right = self.columnViewportPosition(cols[-1]) + self.columnWidth(cols[-1])
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.Antialiasing)
+        bg = QColor(T("bg"))
+        rad = px(self.RADIUS)
+        for a, b in self.blocks:
+            top = self.rowViewportPosition(a)
+            bottom = self.rowViewportPosition(b) + self.rowHeight(b)
+            if bottom < 0 or top > self.viewport().height():
+                continue
+            rect = QRectF(left + 0.5, top + 0.5, right - left - 1, bottom - top - 1)
+            outer = QPainterPath()
+            outer.addRect(QRectF(rect).adjusted(-1, -1, 1, 1))
+            rounded = QPainterPath()
+            rounded.addRoundedRect(rect, rad, rad)
+            p.fillPath(outer.subtracted(rounded), bg)  # 네 모서리를 둥글게 깎는다
+            active = self.active_block == (a, b)
+            p.setPen(QPen(QColor(T("accent") if active else T("group_line")), 2 if active else 1.2))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect, rad, rad)
+        p.end()
 
 
 class WorkplaceTab(QWidget):
@@ -140,7 +175,7 @@ class WorkplaceTab(QWidget):
 
         # 시트: [컴퓨터 정보 | 자리 | 계정 화면과 같은 열]
         self.show_worker = repo.is_cloud and repo.me.is_admin
-        self.table = QTableWidget(0, OFF + len(ACCOUNT_COLUMNS))
+        self.table = BlockTable(0, OFF + len(ACCOUNT_COLUMNS))
         self.table.setHorizontalHeaderLabels(PC_COLUMNS + ACCOUNT_COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -162,7 +197,8 @@ class WorkplaceTab(QWidget):
         self.table.cellEntered.connect(lambda r, c: None if self.nav.drag else self.table.viewport().setCursor(
             Qt.PointingHandCursor if (c - OFF) in ACC_CHAR else Qt.ArrowCursor))
         self._row_map: list[tuple[int, int] | None] = []  # 줄 → (컴퓨터 id, 자리), 간격 줄은 None
-        self.nav = SheetNav(self.table, "work_table_zoom", self._render_cards)
+        self.nav = SheetNav(self.table, "work_table_zoom", self._render_cards,
+                            extra_css=" QTableWidget { border: none; background: transparent; }")
         left.addWidget(self.table, 1)
         foot = QHBoxLayout()
         self.count_label = muted()
@@ -255,7 +291,7 @@ class WorkplaceTab(QWidget):
         pcs = self._visible_pcs()
         t.clearSpans()
         t.clearContents()
-        t.setRowCount(sum(len(pc.slots) for pc in pcs) + max(0, len(pcs) - 1))
+        t.setRowCount(sum(len(pc.slots) for pc in pcs) + len(pcs))
         bold = self.nav.bold_font()
         show_pw = self.pw_btn.isChecked()
         can_edit = self._can_edit_pc()
@@ -264,8 +300,9 @@ class WorkplaceTab(QWidget):
         self._row_map = []
         r = 0
         sel_row = -1
+        blocks = []
         for k, pc in enumerate(pcs):
-            if k > 0:  # 컴퓨터 사이 간격 줄
+            if True:  # 블록 위 간격 줄
                 gap = QTableWidgetItem("")
                 gap.setFlags(Qt.NoItemFlags)
                 gap.setData(GAP_ROLE, True)
@@ -281,7 +318,7 @@ class WorkplaceTab(QWidget):
                 t.setRowHeight(r, row_h)
                 if self.selected == (pc.id, i):
                     sel_row = r
-                end = {GROUP_END_ROLE: i == n, GROUP_START_ROLE: i == 1}
+                end = {GROUP_END_ROLE: False}
                 if i == 1:
                     worker = ((self.worker_names.get(pc.worker_id, "?") if pc.worker_id else "없음")
                               if self.show_worker else "")
@@ -289,8 +326,6 @@ class WorkplaceTab(QWidget):
                     for c, v in enumerate([str(pc.no), pc.name, pc.ld_cloud, pc.anydesk_id, pw, worker]):
                         it = QTableWidgetItem(v)
                         it.setTextAlignment(Qt.AlignCenter)
-                        it.setData(GROUP_END_ROLE, True)    # 합친 칸의 아래가 컴퓨터 경계
-                        it.setData(GROUP_START_ROLE, True)  # 위쪽 테두리
                         if c in EDIT_COLS:
                             it.setData(REAL_ROLE, getattr(pc, EDIT_COLS[c]))
                             it.setToolTip("더블클릭해서 바로 수정 · Ctrl+C 복사 · Ctrl+V 붙여넣기" if can_edit
@@ -301,8 +336,6 @@ class WorkplaceTab(QWidget):
                         t.setItem(r, c, it)
                 slot_it = QTableWidgetItem(str(i))
                 slot_it.setTextAlignment(Qt.AlignCenter)
-                slot_it.setData(GROUP_END_ROLE, i == n)
-                slot_it.setData(GROUP_START_ROLE, i == 1)
                 t.setItem(r, OFF - 1, slot_it)
                 acc = self.accs.get(aid) if aid else None
                 if acc:
@@ -310,8 +343,6 @@ class WorkplaceTab(QWidget):
                 else:
                     it = QTableWidgetItem("다른 담당자의 계정 사용 중" if aid else "비어 있음  ·  눌러서 계정 넣기")
                     it.setForeground(QColor(T("muted") if aid else T("accent_text")))
-                    it.setData(GROUP_END_ROLE, i == n)
-                    it.setData(GROUP_START_ROLE, i == 1)
                     t.setItem(r, OFF, it)
                     t.setSpan(r, OFF, 1, len(ACCOUNT_COLUMNS))
                 # 바로 수정은 컴퓨터 정보 칸(EDIT_COLS)만
@@ -320,9 +351,13 @@ class WorkplaceTab(QWidget):
                     if it and not (can_edit and i == 1 and c in EDIT_COLS):
                         it.setFlags(it.flags() & ~Qt.ItemIsEditable)
                 r += 1
+            blocks.append((start, r - 1))
             if n > 1:
                 for c in range(OFF - 1):
                     t.setSpan(start, c, n, 1)
+        t.blocks = blocks
+        t.active_block = next(((a, b) for a, b in blocks
+                               if self.selected and self._row_map[a] and self._row_map[a][0] == self.selected[0]), None)
         cap_widths(t, OFF, self.nav.zoom)
         # 합친 칸(컴퓨터 정보)은 자동 너비 계산에서 빠지므로 글자 길이로 직접 맞춘다
         fm = QFontMetrics(bold)
@@ -639,6 +674,9 @@ class WorkplaceTab(QWidget):
     # ---------------------------------------------------------------- 동작
     def select_slot(self, pc_id: int, slot: int) -> None:
         self.selected = (pc_id, slot)
+        self.table.active_block = next(((a, b) for a, b in self.table.blocks
+                                        if self._row_map[a] and self._row_map[a][0] == pc_id), None)
+        self.table.viewport().update()
         rows = [i for i, x in enumerate(self._row_map) if x == (pc_id, slot)]
         if rows:
             self.table.selectRow(rows[0])

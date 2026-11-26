@@ -87,9 +87,10 @@ class SheetNav(QObject):
 
     MIN, MAX, STEP = 0.6, 2.0, 0.1
 
-    def __init__(self, table: QTableWidget, settings_key: str, on_change):
+    def __init__(self, table: QTableWidget, settings_key: str, on_change, extra_css: str = ""):
         super().__init__(table)
         self.table = table
+        self.extra_css = extra_css
         self.key = settings_key
         self.on_change = on_change
         self.drag = None
@@ -115,7 +116,8 @@ class SheetNav(QObject):
 
     def apply(self) -> None:
         fs = self.font_px()
-        self.table.setStyleSheet(f"QTableWidget {{ font-size: {fs}px; }} QHeaderView::section {{ font-size: {fs}px; }}")
+        self.table.setStyleSheet(f"QTableWidget {{ font-size: {fs}px; }} QHeaderView::section {{ font-size: {fs}px; }}"
+                                 + self.extra_css)
         self.table.verticalHeader().setDefaultSectionSize(px(36 * self.zoom))
         self.on_change()
 
