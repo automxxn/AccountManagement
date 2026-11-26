@@ -3,10 +3,10 @@ from __future__ import annotations
 import copy
 import re
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+    QCheckBox, QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -15,7 +15,7 @@ from ..db import Repository, RepoError
 from ..models import GAMES, PC, PROVIDERS, Account, Ban, Character, join_level_job, split_level_job
 from .common import T, copy_text, muted, px, style_table
 
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$")  # 해제 시각 (시간은 없어도 됨)
 
 
 def section(text: str) -> QLabel:
@@ -46,21 +46,56 @@ class PasswordField(QWidget):
 
 
 class BanField(QWidget):
+    """[☐ 정지] [2027-06-14 15:30 ▾달력] [☐ 기한 없음]
+    - ▾ 버튼: 달력에서 년/월/일 선택
+    - 년·월·일·시·분 중 한 부분을 누르고 마우스 휠이나 ↑↓ 키로 하나씩 조절, 숫자 직접 입력도 가능
+    """
+
+    FMT = "yyyy-MM-dd HH:mm"
+
     def __init__(self, ban: Ban, parent=None):
         super().__init__(parent)
+        self.original = ban
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(px(8))
         self.check = QCheckBox("정지")
         self.check.setChecked(ban.banned)
-        self.until = QLineEdit(ban.until)
-        self.until.setPlaceholderText("해제일 2027-06-14 (비우면 기한 없음)")
-        self.until.setEnabled(ban.banned)
-        self.check.toggled.connect(self.until.setEnabled)
+        self.until = QDateTimeEdit()
+        self.until.setDisplayFormat(self.FMT)
+        self.until.setCalendarPopup(True)
+        self.until.setKeyboardTracking(True)
+        self.until.setToolTip("▾ 버튼: 달력에서 날짜 고르기 · 년/월/일/시/분을 누르고 휠이나 ↑↓로 조절 · 숫자 직접 입력")
+        self.until.calendarWidget().setGridVisible(True)
+        if ban.until:
+            u = ban.until_full()
+            self.until.setDateTime(QDateTime.fromString(u, self.FMT))
+        else:
+            self.until.setDateTime(QDateTime.currentDateTime().addDays(7))
+        self._start = self.until.dateTime()
+        self.until.setCurrentSection(QDateTimeEdit.DaySection)
+        self.no_limit = QCheckBox("기한 없음")
+        self.no_limit.setChecked(ban.banned and not ban.until)
+        self.check.toggled.connect(self._sync)
+        self.no_limit.toggled.connect(self._sync)
         lay.addWidget(self.check)
         lay.addWidget(self.until, 1)
+        lay.addWidget(self.no_limit)
+        self._sync()
+
+    def _sync(self) -> None:
+        on = self.check.isChecked()
+        self.no_limit.setEnabled(on)
+        self.until.setEnabled(on and not self.no_limit.isChecked())
 
     def value(self) -> Ban:
-        return Ban(self.check.isChecked(), self.until.text().strip() if self.check.isChecked() else "")
+        if not self.check.isChecked():
+            return Ban(False, "")
+        if self.no_limit.isChecked():
+            return Ban(True, "")
+        if self.original.until and self.until.dateTime() == self._start:
+            return Ban(True, self.original.until)  # 손대지 않았으면 원래 값 그대로
+        return Ban(True, self.until.dateTime().toString(self.FMT))
 
 
 class CharacterEditor(QWidget):

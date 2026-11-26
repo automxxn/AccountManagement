@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 
 GAMES = ("메랜", "플래닛")
 PROVIDERS = ("넥슨", "구글", "네이버")
@@ -22,14 +22,19 @@ def norm_login(login_id: str) -> str:
 @dataclass
 class Ban:
     banned: bool = False
-    until: str = ""  # 해제일 YYYY-MM-DD, 비어 있으면 기한 없음
+    until: str = ""  # 해제 시각 'YYYY-MM-DD HH:MM' (예전 데이터는 'YYYY-MM-DD'), 비어 있으면 기한 없음
 
-    def active(self, today: str | None = None) -> bool:
+    def until_full(self) -> str:
+        """비교용 'YYYY-MM-DD HH:MM'. 날짜만 있으면 그날 끝(23:59)까지 정지로 본다."""
+        u = (self.until or "").strip()
+        return u if len(u) > 10 else (u + " 23:59" if u else "")
+
+    def active(self, now: str | None = None) -> bool:
         if not self.banned:
             return False
         if not self.until:
             return True
-        return self.until >= (today or date.today().isoformat())
+        return self.until_full() >= (now or datetime.now().strftime("%Y-%m-%d %H:%M"))
 
     def label(self, game: str) -> str:
         if not self.active():

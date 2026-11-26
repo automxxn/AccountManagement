@@ -74,25 +74,44 @@ def status_color(status: str) -> str:
     return THEMES[_state["theme"]]["status"].get(status, T("muted"))
 
 
-def _check_icon() -> str:
-    """체크 표시(흰색 ✓) 그림 파일 경로. 스타일시트는 파일 경로로만 그림을 받으므로 한 번 만들어 둔다."""
+def _icon(name: str, svg: str) -> str:
+    """스타일시트에 쓸 작은 그림 파일을 만들어 두고 경로를 돌려준다 (스타일시트는 파일 경로만 받음)."""
     import os
     from pathlib import Path
     d = Path(os.environ.get("APPDATA") or str(Path.home())) / "AccountManagement" / "ui"
     d.mkdir(parents=True, exist_ok=True)
-    f = d / "check.svg"
-    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
-           '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#FFFFFF" stroke-width="2.2" '
-           'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    f = d / f"{name}.svg"
     if not f.exists() or f.read_text(encoding="utf-8") != svg:
         f.write_text(svg, encoding="utf-8")
-    return str(f).replace("\\", "/")
+    return str(f).replace(chr(92), "/")
+
+
+def _check_icon() -> str:
+    return _icon("check", '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                          '<path d="M3.5 8.5l3 3 6-7" fill="none" stroke="#FFFFFF" stroke-width="2.2" '
+                          'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def _chevron_icon(color: str) -> str:
+    return _icon("chevron_" + color.strip("#"), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                 f'<path d="M4 6l4 4 4-4" fill="none" stroke="{color}" stroke-width="1.8" '
+                 'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def _calendar_icon(color: str) -> str:
+    return _icon("calendar_" + color.strip("#"), '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+                 f'<rect x="2" y="3" width="12" height="11" rx="2" fill="none" stroke="{color}" stroke-width="1.5"/>'
+                 f'<path d="M2 6.5h12M5 1.5v3M11 1.5v3" stroke="{color}" stroke-width="1.5" stroke-linecap="round"/>'
+                 f'<rect x="4.5" y="8.5" width="2" height="2" fill="{color}"/>'
+                 f'<rect x="9" y="8.5" width="2" height="2" fill="{color}"/></svg>')
 
 
 def build_style() -> str:
     c = THEMES[_state["theme"]]
     p = px
     check = _check_icon()
+    chevron = _chevron_icon(c["muted"])
+    calendar = _calendar_icon(c["muted"])
     return f"""
 QWidget {{ font-family: "Malgun Gothic"; font-size: {p(13)}px; color: {c['ink']}; }}
 QMainWindow, QWidget#page, QDialog {{ background: {c['bg']}; }}
@@ -135,12 +154,24 @@ QPushButton#chip:checked {{ background: {c['chip_on_bg']}; border-color: {c['chi
 QPushButton#zoom {{ padding: {p(2)}px {p(8)}px; min-width: {p(22)}px; }}
 QToolButton::menu-indicator {{ image: none; }}
 
-QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{
+QLineEdit, QComboBox, QSpinBox, QDateTimeEdit, QPlainTextEdit {{
     background: {c['surface']}; border: 1px solid {c['input_border']}; border-radius: 7px; padding: {p(6)}px {p(8)}px;
     color: {c['ink']}; selection-background-color: {c['selection']}; selection-color: {c['ink']}; }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus {{ border: 1px solid {c['accent']}; }}
-QLineEdit:disabled {{ background: {c['surface2']}; color: {c['faint']}; }}
-QComboBox::drop-down {{ border: none; width: {p(22)}px; }}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateTimeEdit:focus, QPlainTextEdit:focus {{ border: 1px solid {c['accent']}; }}
+QLineEdit:disabled, QDateTimeEdit:disabled {{ background: {c['surface2']}; color: {c['faint']}; }}
+QComboBox::drop-down, QDateTimeEdit::drop-down {{ border: none; width: {p(26)}px; }}
+QComboBox::down-arrow {{ image: url({chevron}); width: {p(12)}px; height: {p(12)}px; }}
+QDateTimeEdit::down-arrow {{ image: url({calendar}); width: {p(16)}px; height: {p(16)}px; }}
+QDateTimeEdit::down-arrow:disabled {{ image: none; }}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{ background: {c['surface2']}; }}
+QCalendarWidget QToolButton {{ background: transparent; border: none; color: {c['ink']}; padding: {p(4)}px {p(8)}px;
+    font-weight: bold; }}
+QCalendarWidget QToolButton:hover {{ background: {c['hover']}; }}
+QCalendarWidget QMenu {{ background: {c['surface']}; color: {c['ink']}; }}
+QCalendarWidget QSpinBox {{ padding: 0 {p(4)}px; }}
+QCalendarWidget QAbstractItemView {{ background: {c['surface']}; color: {c['ink']}; outline: 0;
+    selection-background-color: {c['accent']}; selection-color: #FFFFFF; }}
+QCalendarWidget QAbstractItemView:disabled {{ color: {c['faint']}; }}
 QComboBox QAbstractItemView {{ border: 1px solid {c['line']}; background: {c['surface']}; color: {c['ink']};
     selection-background-color: {c['accent_soft']}; selection-color: {c['ink']}; }}
 QCheckBox {{ spacing: {p(8)}px; }}
