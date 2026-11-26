@@ -1199,6 +1199,11 @@ begin
     if v_ag.pc_id is not null then delete from pc_creds where pc_id = v_ag.pc_id; end if;
     if p_pc is not null then delete from pc_creds where pc_id = p_pc; end if;
     update agents set pc_id = p_pc where user_id = p_agent;
+    -- 작업장 LD클라우드 칸이 비어 있으면 그 실행기가 여는 클라우드 이름으로 채운다 ('클라우드22번 #123' → '클라우드22번')
+    if p_pc is not null and coalesce(v_ag.state -> 'cfg' ->> 'cloud', '') <> '' then
+        update pcs set ld_cloud = trim(split_part(v_ag.state -> 'cfg' ->> 'cloud', ' #', 1)), updated_at = now()
+         where id = p_pc and trim(coalesce(ld_cloud, '')) = '';
+    end if;
     perform _log(case when p_pc is null then '실행기 연결 끊기' else '실행기 연결' end,
                  v_ag.machine || coalesce(' → ' || _pc_no_label(p_pc), ''), coalesce(v_team, _pc_team(v_ag.pc_id)));
 end $$;

@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
@@ -60,6 +62,14 @@ def _took(c: dict) -> str:
     return " · ".join(parts)
 
 
+def _agent_cloud(ag: Agent) -> str:
+    """그 PC 실행기가 여는 클라우드 이름 ('이름 #ID' → 이름)."""
+    return ((ag.state.get("cfg") or {}).get("cloud") or "").split(" #")[0].strip()
+
+
+_NAME_NUM = re.compile(r"^(\D+?)(\d+)")   # '클라우드20(타문)' → ('클라우드', '20')
+
+
 def cloud_match(ld_cloud: str, device: str) -> int:
     """작업장 LD클라우드 칸 값과 LD CLOUD 기기 이름이 같은 클라우드인지 점수 (0 = 아님, 클수록 확실).
 
@@ -72,6 +82,11 @@ def cloud_match(ld_cloud: str, device: str) -> int:
         return 0
     if a == b:
         return 500 + len(a)
+    # '클라우드20(타문)' ↔ '클라우드20번', '클라우드13메랜(타문)' ↔ '클라우드13번': 앞 글자가 같으면 번호로 판단
+    ma, mb = _NAME_NUM.match(a), _NAME_NUM.match(b)
+    if ma and mb and ma.group(1) and ma.group(1) == mb.group(1):
+        same = int(ma.group(2)) == int(mb.group(2))
+        return 400 + len(ma.group(0)) if same else 0
     short, long_ = (a, b) if len(a) < len(b) else (b, a)
     start = long_.find(short)
     while start >= 0:
@@ -412,8 +427,9 @@ class AgentsTab(QWidget):
         pl = QVBoxLayout(self.pending_box)
         pl.setContentsMargins(0, 8, 0, 0)
         pl.addWidget(QLabel("<b>연결 대기 실행기</b> — 새로 설치되거나 업데이트된 실행기예요. 어느 컴퓨터인지 골라 [연결]을 누르세요."))
-        self.pend = QTableWidget(0, 5)
-        self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "마지막 연락", "연결할 컴퓨터 (눌러서 고르기)", ""])
+        self.pend = QTableWidget(0, 6)
+        self.pend.setHorizontalHeaderLabels(["PC 이름 (윈도우)", "버전", "그 PC가 여는 클라우드", "마지막 연락",
+                                             "연결할 컴퓨터 (눌러서 고르기)", ""])
         self.pend.verticalHeader().setVisible(False)
         style_table(self.pend)
         self.pend.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -559,7 +575,7 @@ class AgentsTab(QWidget):
         for c, w in enumerate([120, 90, 90, 80, 150]):
             self.hist.setColumnWidth(c, px(w))
         self.pend.verticalHeader().setDefaultSectionSize(px(40))
-        for c, w in enumerate([180, 100, 100, 260]):
+        for c, w in enumerate([150, 90, 220, 110, 300]):
             self.pend.setColumnWidth(c, px(w))
 
     def _toggle(self, pc_id: int, on: bool) -> None:
@@ -666,24 +682,31 @@ class AgentsTab(QWidget):
         if key == self._pending_key:
             # 같은 목록이면 칸을 다시 만들지 않는다 (고르던 상자가 닫히거나 바뀌지 않게). 마지막 연락만 갱신
             for r, ag in enumerate(self.pending):
-                self.pend.setItem(r, 2, _item(_ago(ag.seconds_ago)))
+                self.pend.setItem(r, 3, _item(_ago(ag.seconds_ago)))
             return
         self._pending_key = key
         self.pend.setRowCount(len(self.pending))
         for r, ag in enumerate(self.pending):
             self.pend.setItem(r, 0, _item(ag.machine))
             self.pend.setItem(r, 1, _item(ag.version))
-            self.pend.setItem(r, 2, _item(_ago(ag.seconds_ago)))
+            opens = _agent_cloud(ag)
+            oc = _item(opens or "(정해지지 않음)")
+            oc.setToolTip("그 PC 실행기에 저장돼 있는 '열 클라우드'예요. 작업장의 LD클라우드 칸과 같은 번호인 컴퓨터를 추천해요.")
+            if not opens:
+                oc.setForeground(QColor(T("muted")))
+            self.pend.setItem(r, 2, oc)
+            self.pend.setItem(r, 3, _item(_ago(ag.seconds_ago)))
             combo = QComboBox()
             combo.addItem("컴퓨터 고르기...", None)
             for p in self.pcs:
-                combo.addItem(f"{p.no}. {p.name}" + ("  (실행기 있음)" if p.id in taken else ""), p.id)
+                combo.addItem(f"{p.no}. {p.name}" + (f"  · {p.ld_cloud}" if p.ld_cloud else "")
+                              + ("  (실행기 있음)" if p.id in taken else ""), p.id)
             wheel_only_when_focused(combo)  # 지나가다 휠을 굴려도 바뀌지 않게
             chosen = self.pending_choice.get(ag.user_id)
             idx = combo.findData(chosen) if chosen is not None else -1
             combo.setCurrentIndex(idx if idx >= 0 else self._guess_index(ag, combo, taken))
             combo.currentIndexChanged.connect(lambda _i, a=ag, c=combo: self.pending_choice.__setitem__(a.user_id, c.currentData()))
-            self.pend.setCellWidget(r, 3, combo)
+            self.pend.setCellWidget(r, 4, combo)
             w = QWidget()
             l = QHBoxLayout(w)
             l.setContentsMargins(4, 2, 4, 2)
@@ -692,20 +715,20 @@ class AgentsTab(QWidget):
                                "그 PC 실행기가 알려 준 LD 클라우드로 맞는 컴퓨터를 다시 골라요"))
             l.addWidget(button("지우기", "", lambda _=False, a=ag: self._forget(a), "잘못 등록된 실행기를 목록에서 지워요"))
             l.addStretch(1)
-            self.pend.setCellWidget(r, 4, w)
+            self.pend.setCellWidget(r, 5, w)
         self.pend.setFixedHeight(px(40) * min(len(self.pending), 4) + px(44))
 
     def _picking(self) -> bool:
         """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있거나 그 칸이 선택돼 있음."""
         for r in range(self.pend.rowCount()):
-            c = self.pend.cellWidget(r, 3)
+            c = self.pend.cellWidget(r, 4)
             if isinstance(c, QComboBox) and (c.view().isVisible() or c.hasFocus()):
                 return True
         return False
 
     def _guess_index(self, ag: Agent, combo: QComboBox, taken: set) -> int:
         """그 PC 실행기가 지금 여는 클라우드(또는 PC 이름)와 맞는 컴퓨터. 없으면 0(고르기)."""
-        cloud = (ag.state.get("cfg") or {}).get("cloud", "").split(" #")[0].strip()  # '이름 #ID' → 이름
+        cloud = _agent_cloud(ag)
         best, best_score = 0, 0
         for i in range(1, combo.count()):
             p = next((x for x in self.pcs if x.id == combo.itemData(i)), None)
