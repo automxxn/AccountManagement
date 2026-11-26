@@ -104,6 +104,11 @@ class CloudRepository:
             return RepoError("이메일 인증이 꺼져 있지 않아요. Supabase 설정에서 'Confirm email'을 꺼 주세요.")
         if "password should be" in low:
             return RepoError("비밀번호가 너무 짧아요. 6자 이상으로 정하세요.")
+        # 프로그램은 새 버전인데 서버 SQL이 예전 것일 때 (새 명령·새 기능을 서버가 모름)
+        if "pc_commands_kind_check" in low or "could not find the function" in low \
+                or ("column" in low and "does not exist" in low):
+            return RepoError("서버 설정(SQL)이 프로그램보다 예전 버전이에요. 총관리자가 Supabase SQL Editor에서 "
+                             "supabase/schema.sql 전체를 다시 실행하면 돼요.\n(자세한 내용: " + str(msg) + ")")
         if "먼저" in str(msg):
             return ConflictError(str(msg))
         return RepoError(str(msg))
