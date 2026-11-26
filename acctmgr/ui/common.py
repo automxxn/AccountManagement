@@ -472,7 +472,8 @@ def apply_native_icon(widget, exe_path: str | None = None) -> bool:
     import sys
     if sys.platform != "win32":
         return False
-    path = exe_path or (sys.executable if getattr(sys, "frozen", False) else None)
+    from ..selfname import current_exe
+    path = exe_path or (str(current_exe()) if getattr(sys, "frozen", False) else None)
     if not path:
         return False
     try:

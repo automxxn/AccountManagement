@@ -638,6 +638,12 @@ class AgentsTab(QWidget):
         bar2.addWidget(muted("실행기:"))
         bar2.addWidget(button("실행기 다시 켜기", "", lambda: self._send_checked("restart_agent"),
                               "실행기를 껐다가 다시 켜요. 새 버전이 있으면 이때 업데이트돼요"))
+        wb = button("실행기 창", "", None, "체크한 컴퓨터의 실행기 창을 화면에 띄우거나 트레이로 보내요 (그 PC에 들어가지 않아도 돼요)")
+        wm = QMenu(wb)
+        wm.addAction("창 열기 (화면에 띄우기)", lambda: self._send_checked("window_show"))
+        wm.addAction("트레이로 보내기 (창 숨기기)", lambda: self._send_checked("window_hide"))
+        wb.setMenu(wm)
+        bar2.addWidget(wb)
         bar2.addSpacing(px(16))
         bar2.addWidget(button("선택한 컴퓨터에 같은 설정", "", self._bulk_settings,
                               "체크한 컴퓨터들의 실행기 설정을 한 번에 똑같이 바꿔요 (열 클라우드는 제외)"))
@@ -860,6 +866,8 @@ class AgentsTab(QWidget):
                 team = self._team_cell(ag, red)
                 live = (ag.state or {}).get("realtime")
                 speed = "" if not ag.online or live is None else ("  · 즉시" if live else "  · 20초마다")
+                if ag.online and (ag.state or {}).get("window") is not None:
+                    speed += "  · 창 열림" if ag.state.get("window") else "  · 트레이"
                 st = _item(("● 켜짐" if ag.online else "● 꺼짐 (" + _ago(ag.seconds_ago) + ")") + speed
                            + "\n" + self._mac_line(ag, pc))
                 st.setForeground(green if ag.online else gray)

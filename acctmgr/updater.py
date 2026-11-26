@@ -1,7 +1,7 @@
 """GitHub Releases 기반 자동 업데이트.
 
 1. 최신 릴리스 확인: GET /repos/{GITHUB_REPO}/releases/latest
-2. 더 높은 버전이면 AccountManagement.exe를 exe 옆에 '.new'로 내려받고 SHA-256을 확인
+2. 더 높은 버전이면 AM.exe(예전 릴리스는 AccountManagement.exe)를 exe 옆에 '.new'로 내려받고 SHA-256을 확인
 3. 실행 중인 exe를 '.old'로 이름 바꾸고(Windows는 실행 중인 exe의 이름 변경을 허용) 새 파일을 그 자리에 둔 뒤 다시 실행
 4. 다음 실행 때 '.old' 파일을 지운다
 """
@@ -19,10 +19,11 @@ from typing import Callable
 
 import httpx
 
+from .selfname import LEGACY_NAME, NEW_NAME, current_exe
 from .version import GITHUB_REPO, __version__
 
-ASSET_NAME = "AccountManagement.exe"
-UA = {"User-Agent": "AccountManagement-updater", "Accept": "application/vnd.github+json"}
+ASSET_NAME = NEW_NAME            # 릴리스에는 예전 버전이 받을 수 있게 AccountManagement.exe도 같이 올린다
+UA = {"User-Agent": "AM-updater", "Accept": "application/vnd.github+json"}
 
 
 class UpdateError(Exception):
@@ -62,13 +63,14 @@ def check(timeout: float = 6.0, current: str = __version__) -> UpdateInfo | None
     if parse_version(tag) <= parse_version(current):
         return None
     assets = {a["name"]: a for a in j.get("assets", [])}
-    exe = assets.get(ASSET_NAME)
+    name = ASSET_NAME if ASSET_NAME in assets else LEGACY_NAME
+    exe = assets.get(name)
     if not exe:
         return None
     sha = (exe.get("digest") or "").removeprefix("sha256:")
-    if not sha and f"{ASSET_NAME}.sha256" in assets:
+    if not sha and f"{name}.sha256" in assets:
         try:
-            s = httpx.get(assets[f"{ASSET_NAME}.sha256"]["browser_download_url"], headers=UA,
+            s = httpx.get(assets[f"{name}.sha256"]["browser_download_url"], headers=UA,
                           timeout=timeout, follow_redirects=True)
             sha = s.text.strip().split()[0] if s.status_code == 200 else ""
         except httpx.HTTPError:
@@ -152,7 +154,7 @@ def install(info: UpdateInfo, progress=None) -> None:
     """내려받기 → 교체 → 재시작. 호출한 쪽은 곧바로 프로그램을 끝내야 한다."""
     if not is_frozen():
         raise UpdateError("개발 모드(파이썬으로 실행)에서는 자동 업데이트를 하지 않아요.")
-    exe = Path(sys.executable)
+    exe = current_exe()
     new_file = download(info, exe.with_name(exe.name + ".new"), progress)
     swap(exe, new_file)
     restart(exe)
@@ -162,9 +164,10 @@ def cleanup() -> None:
     """지난 업데이트에서 남은 파일 정리."""
     if not is_frozen():
         return
-    exe = Path(sys.executable)
-    for suffix in (".old", ".new", ".new.part"):
-        try:
-            exe.with_name(exe.name + suffix).unlink(missing_ok=True)
-        except OSError:
-            pass
+    exe = current_exe()
+    for name in {exe.name, LEGACY_NAME}:     # 이름을 AM.exe로 바꾸기 전 업데이트에서 남은 파일도
+        for suffix in (".old", ".new", ".new.part"):
+            try:
+                exe.with_name(name + suffix).unlink(missing_ok=True)
+            except OSError:
+                pass

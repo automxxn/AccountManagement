@@ -1,5 +1,6 @@
-# Build AccountManagement.exe (used locally and by GitHub Actions)
-# Output: dist\AccountManagement.exe, dist\AccountManagement.exe.sha256
+# Build AM.exe (used locally and by GitHub Actions)
+# Output: dist\AM.exe (+ .sha256), and the same file as dist\AccountManagement.exe (+ .sha256)
+# so that versions before 1.9.2, which look for AccountManagement.exe, can still update.
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -16,12 +17,14 @@ if ($env:SUPABASE_URL -and $env:SUPABASE_ANON_KEY) {
 }
 
 python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name AccountManagement `
+    --name AM `
     --icon assets/app.ico `
     --collect-submodules acctmgr `
     run_app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
 
-$hash = (Get-FileHash "dist\AccountManagement.exe" -Algorithm SHA256).Hash.ToLower()
+$hash = (Get-FileHash "dist\AM.exe" -Algorithm SHA256).Hash.ToLower()
+[IO.File]::WriteAllText("$PSScriptRoot\dist\AM.exe.sha256", $hash)
+Copy-Item "dist\AM.exe" "dist\AccountManagement.exe" -Force
 [IO.File]::WriteAllText("$PSScriptRoot\dist\AccountManagement.exe.sha256", $hash)
-Write-Host "Built dist\AccountManagement.exe ($hash)"
+Write-Host "Built dist\AM.exe ($hash) + dist\AccountManagement.exe (same file, for old versions)"

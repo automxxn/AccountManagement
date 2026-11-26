@@ -3,7 +3,7 @@ import sys
 from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QApplication
 
-from . import logsetup
+from . import logsetup, selfname
 from .db import Repository
 from .version import __version__
 from .ui.common import app_icon, apply_appearance, apply_native_icon, refresh_shell_icons_once
@@ -42,8 +42,10 @@ def main() -> None:
     logsetup.setup()
     _set_app_id()
     logsetup.log.info("시작 v%s", __version__)
+    selfname.migrate()   # 예전 이름(AccountManagement.exe)이면 AM.exe로 바꾸고 바로가기 고치기
     app = QApplication(sys.argv)
-    app.setApplicationName("AccountManagement")
+    app.setApplicationName("AccountManagement")   # 설정 저장 위치가 바뀌지 않게 내부 이름은 그대로
+    app.setApplicationDisplayName("AM")
     app.setWindowIcon(app_icon())
     icons = _NativeIcons()
     app.installEventFilter(icons)

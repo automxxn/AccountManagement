@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(side)
         lay.setContentsMargins(14, 20, 14, 14)
         lay.setSpacing(6)
-        lay.addWidget(label("AccountManagement", "appTitle"))
+        lay.addWidget(label("AM", "appTitle"))
         lay.addWidget(label(f"v{__version__} · {'클라우드' if self.cloud else '이 PC에 저장'}", "appVersion"))
         lay.addSpacing(10)
         self.team_box = QComboBox()
@@ -281,7 +281,7 @@ class MainWindow(QMainWindow):
         team = self.repo.team() if self.cloud else None
         if team:
             where += f" · {team.name}"
-        self.setWindowTitle(f"AccountManagement v{__version__} — {self.repo.actor} ({role}) · {where}")
+        self.setWindowTitle(f"AM v{__version__} — {self.repo.actor} ({role}) · {where}")
 
     def _safe(self, fn) -> None:
         try:
@@ -421,7 +421,7 @@ class MainWindow(QMainWindow):
         view = ViewAsRepo(self.repo, who)
         w = MainWindow(view, banner=f"{who.display_name}({ROLES.get(who.role, who.role)}) 시점으로 보는 중 — 보기만 할 수 있어요. "
                                     "데이터는 총관리자 로그인으로 읽어서 실제와 아주 조금 다를 수 있어요. 창을 닫으면 끝나요.")
-        w.setWindowTitle(f"[{who.display_name} 시점] AccountManagement v{__version__}")
+        w.setWindowTitle(f"[{who.display_name} 시점] AM v{__version__}")
         w.resize(self.size())
         w.show()
         self._view_windows.append(w)
@@ -436,7 +436,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QProcess
         settings().setValue("skip_auto_once", True)
         args = [] if getattr(sys, "frozen", False) else sys.argv
-        if QProcess.startDetached(sys.executable, args):
+        from ..selfname import current_exe
+        if QProcess.startDetached(str(current_exe()) if getattr(sys, "frozen", False) else sys.executable, args):
             QApplication.quit()
         else:
             QMessageBox.warning(self, "다른 아이디로 로그인", "다시 켜지 못했어요. 프로그램을 직접 껐다 켜 주세요.")

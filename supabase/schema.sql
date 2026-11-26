@@ -1122,7 +1122,8 @@ alter table public.pc_commands add column if not exists arg text not null defaul
 alter table public.pc_commands drop constraint if exists pc_commands_kind_check;
 alter table public.pc_commands add constraint pc_commands_kind_check check (kind in ('start', 'restart', 'close', 'login_a', 'login_b', 'stop',
                                         'amp_run', 'amp_stop', 'map_run', 'map_stop', 'amp_folder', 'map_folder',
-                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent', 'amp_find'));
+                                        'amp_clear', 'map_clear', 'reload_devices', 'find_ld', 'restart_agent', 'amp_find',
+                                        'window_show', 'window_hide'));
 
 -- LD 클라우드 표기 '이름 #ID' 나누기
 create or replace function public._cloud_id(c text) returns text
