@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QAbstractItemView, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QAbstractItemView, QApplication, QTableWidget, QTableWidgetItem
 
 from ..models import GAMES, Account
 from .common import T, px, status_color
@@ -179,6 +179,17 @@ class SheetNav(QObject):
         if t == QEvent.Wheel and ev.modifiers() & Qt.ControlModifier:
             self.set(self.zoom + (self.STEP if ev.angleDelta().y() > 0 else -self.STEP))
             return True
+        if t == QEvent.Wheel:
+            # 표 위에서 휠은 그 표 안에서만: 끝에 닿아도 바깥(화면 전체 스크롤)으로 넘기지 않는다.
+            # 그 방향으로 스크롤할 게 전혀 없는 표(줄이 다 보이는 표)면 바깥이 받게 둔다
+            d = ev.angleDelta()
+            bar = (self.table.horizontalScrollBar() if abs(d.x()) > abs(d.y())
+                   else self.table.verticalScrollBar())
+            if bar.maximum() > bar.minimum():
+                QApplication.sendEvent(bar, ev)
+                ev.accept()
+                return True
+            return False
         # 휠 버튼을 꾹 누른 채 움직이면 보는 위치를 상하좌우로 옮긴다 (표 밖으로 나가도 계속)
         if t == QEvent.MouseButtonPress and ev.button() == Qt.MiddleButton:
             self.drag = (ev.globalPosition().toPoint(), self.table.horizontalScrollBar().value(),

@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
     QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..db import RepoError
@@ -739,19 +739,39 @@ class AgentsTab(QWidget):
         split = QSplitter(Qt.Vertical)
         split.addWidget(self.table)
         split.addWidget(bottom)
-        split.setSizes([520, 260])
+        split.setChildrenCollapsible(False)
+        self.table.setMinimumHeight(px(260))
+        bottom.setMinimumHeight(px(180))
+        # 화면 전체가 스크롤되므로, 연결 대기 목록이 길어져도 위 표·명령 기록은 이 높이 아래로 줄어들지 않는다
+        split.setMinimumHeight(px(640))
+        split.setSizes([420, 220])
 
-        lay = QVBoxLayout(self)
+        # 화면 전체를 아래로 스크롤 (표 위에서 휠 = 그 표 안에서만, 표 밖에서 휠 = 화면 전체)
+        content = QWidget()
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setWidget(content)
+        page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.page_scroll = page
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(page)
+
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
         lay.addWidget(page_header("PC 조종", "LD CLOUD 실행기에 명령을 보내고 상태를 봐요",
                                   [button("새로고침", "", self.refresh)]))
         lay.addWidget(hint)
-        lay.addWidget(muted("표 크기: 표 위에서 Ctrl+휠로 조절, 휠 버튼을 누른 채 끌면 이동 (표마다 따로 기억)"))
+        lay.addWidget(muted("표 위에서 휠 = 그 표 안에서 이동, Ctrl+휠 = 표 크기, 휠 버튼 누른 채 끌기 = 이동 (표마다 따로 기억).  "
+                            "표 밖에서 휠 = 화면 전체를 위아래로"))
         lay.addLayout(bar)
         lay.addLayout(bar2)
         lay.addWidget(split, 1)
         lay.addWidget(self.pending_box)
+
+        # 가로는 스크롤하지 않음: 버튼 줄이 잘리지 않게 이 화면의 최소 폭을 예전처럼 창에 그대로 적용
+        page.setMinimumWidth(content.minimumSizeHint().width() + page.verticalScrollBar().sizeHint().width() + 4)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -924,6 +944,14 @@ class AgentsTab(QWidget):
         fit_columns(self.hist, mins={0: 120}, caps={5: 420})
         self.pend.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "pend_nav", None), 40))
         fit_columns(self.pend, mins={4: 300, 6: 110, 7: 50}, caps={2: 280, 6: 180})
+        self._fit_pend_height()
+
+    def _fit_pend_height(self) -> None:
+        """연결 대기 표는 줄을 모두 보여 준다 (안에서 스크롤하지 않고, 길어지면 화면 전체가 스크롤됨)."""
+        p = self.pend
+        rows = p.verticalHeader().length() if p.rowCount() else p.verticalHeader().defaultSectionSize()
+        bar = p.horizontalScrollBar().sizeHint().height()
+        p.setFixedHeight(rows + p.horizontalHeader().sizeHint().height() + 2 * p.frameWidth() + bar + px(2))
 
     def _toggle(self, pc_id: int, on: bool) -> None:
         (self.checked.add if on else self.checked.discard)(pc_id)
@@ -1226,7 +1254,7 @@ class AgentsTab(QWidget):
                 wheel_only_when_focused(tc)
                 tc.activated.connect(lambda _i, a=ag, c=tc: self._set_team(a, c.currentData()))
                 self.pend.setCellWidget(r, 6, tc)
-        self.pend.setFixedHeight(px(40) * min(max(len(self.pending), 1), 10 if linked_mode else 6) + px(44))
+        self._fit_pend_height()
 
     def _picking(self) -> bool:
         """연결 대기 표에서 컴퓨터를 고르는 중인지: 고르기 목록이 열려 있을 때만.
