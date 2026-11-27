@@ -223,6 +223,20 @@ QFrame#vline {{ background: {c['line']}; max-width: 1px; min-width: 1px; border:
 QFrame#pcRow {{ background: {c['surface']}; border: 1px solid {c['line']}; border-radius: 12px; }}
 QFrame#pcRow[active="true"] {{ border: 1px solid {c['accent_line']}; }}
 QLabel#pcNo {{ font-size: {p(18)}px; font-weight: bold; color: {c['accent_text']}; }}
+QFrame#pcCard {{ background: {c['surface']}; border: 1px solid {c['line']}; border-radius: 12px; }}
+QFrame#pcCard:hover {{ border-color: {c['faint']}; }}
+QFrame#pcCard[current="true"] {{ border-color: {c['accent_line']}; }}
+QFrame#pcCard[checked="true"] {{ border-color: {c['accent']}; background: {c['accent_soft']}; }}
+QFrame#cardSlot {{ background: {c['surface2']}; border: 1px solid {c['line']}; border-radius: 8px; }}
+QFrame#pcCard[off="true"] QFrame#cardSlot {{ background: {c['slot_empty']}; }}
+QFrame#cardLine {{ background: {c['line']}; border: none; }}
+QLabel#cardNo {{ font-size: {p(16)}px; font-weight: bold; color: {c['accent_text']}; }}
+QFrame#pcCard[off="true"] QLabel#cardNo {{ color: {c['muted']}; }}
+QLabel#cardName {{ font-size: {p(14)}px; font-weight: bold; }}
+QLabel#cardTag {{ color: {c['muted']}; font-size: {p(11)}px; font-weight: bold; }}
+QLabel#cardAcc {{ font-size: {p(13)}px; }}
+QLabel#cardSmall {{ font-size: {p(12)}px; }}
+QPushButton#cardBtn {{ padding: {p(2)}px {p(8)}px; font-size: {p(12)}px; border-radius: 6px; }}
 QLabel#pcName {{ font-size: {p(15)}px; font-weight: bold; }}
 QFrame#slot {{ background: {c['surface']}; border: 1px solid {c['line']}; border-radius: 9px; }}
 QFrame#slot:hover {{ border-color: {c['faint']}; }}

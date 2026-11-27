@@ -13,16 +13,18 @@ from PySide6.QtWidgets import (
     QMenu,
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout, QLineEdit,
     QHeaderView,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..db import RepoError
 from ..models import AGENT_KINDS, COMMAND_STATUS, GAMES, Agent
 from .common import (
-    T, FlowLayout, button, fit_columns, group, muted, page_header, px, run_safely, style_table,
+    T, FlowLayout, ToggleSwitch, button, fit_columns, group, muted, page_header, px, run_safely, style_table,
     wheel_only_when_focused, zoom_rows,
 )
+from . import sheet as _sheet
+from .pcboard import PcBoard
 from .sheet import SheetNav
 
 COLS = ["", "번호", "컴퓨터", "실행기", "실행기 팀 (코드)", "지금 상태", "A (1자리)", "B (2자리)", "마지막 명령", "결과", ""]
@@ -740,8 +742,22 @@ class AgentsTab(QWidget):
         self.pend_nav = SheetNav(self.pend, "zoom_pc_pend", self.restyle)
         pl.addWidget(self.pend)
 
+        # 현황판 (카드) 보기: 표와 같은 내용을 컴퓨터마다 블록 하나로
+        self.board = PcBoard(self)
+        self.legend = QLabel()
+        self.legend.setTextFormat(Qt.RichText)
+        board_page = QWidget()
+        bpl = QVBoxLayout(board_page)
+        bpl.setContentsMargins(0, 0, 0, 0)
+        bpl.setSpacing(px(8))
+        bpl.addWidget(self.legend)
+        bpl.addWidget(self.board, 1)
+        self.view = QStackedWidget()
+        self.view.addWidget(self.table)
+        self.view.addWidget(board_page)
+
         split = QSplitter(Qt.Vertical)
-        split.addWidget(self.table)
+        split.addWidget(self.view)
         split.addWidget(bottom)
         split.setChildrenCollapsible(False)
         self.table.setMinimumHeight(px(260))
@@ -764,8 +780,33 @@ class AgentsTab(QWidget):
         lay = QVBoxLayout(content)
         lay.setContentsMargins(28, 24, 28, 20)
         lay.setSpacing(12)
+        # 보기 전환: 표 ↔ 현황판 (밀어서), 현황판은 가로 몇 칸인지
+        st = _sheet.settings()
+        board_on = st.value("pc_view", "table") == "board"
+        self.view_switch = ToggleSwitch(board_on)
+        self.view_switch.setToolTip("표로 보기 ↔ 컴퓨터마다 블록으로 보는 현황판")
+        lt, lb = QLabel("표"), QLabel("현황판")
+        for lab, on in ((lt, False), (lb, True)):
+            lab.setCursor(Qt.PointingHandCursor)
+            lab.mousePressEvent = lambda _e, v=on: self.view_switch.setChecked(v)
+        self.view_labels = (lt, lb)
+        self.view_switch.toggled.connect(self._set_view)
+        self.cols_box = QComboBox()
+        self.cols_box.addItem("자동", 0)
+        for n in range(2, 11):
+            self.cols_box.addItem(str(n), n)
+        try:
+            want = int(st.value("pc_board_cols", 0) or 0)
+        except (TypeError, ValueError):
+            want = 0
+        self.cols_box.setCurrentIndex(max(0, self.cols_box.findData(want)))
+        self.board.fixed_cols = want if self.cols_box.findData(want) > 0 else 0
+        self.cols_box.currentIndexChanged.connect(self._set_cols)
+        wheel_only_when_focused(self.cols_box)
+        self.cols_group = group("가로", self.cols_box, "칸")
         lay.addWidget(page_header("PC 조종", "LD CLOUD 실행기에 명령을 보내고 상태를 봐요",
-                                  [button("새로고침", "", self.refresh)]))
+                                  [group(lt, self.view_switch, lb, spacing=px(8)), self.cols_group,
+                                   button("새로고침", "", self.refresh)]))
         lay.addWidget(hint)
         lay.addWidget(muted("표 위에서 휠 = 그 표 안에서 이동, Ctrl+휠 = 표 크기, 휠 버튼 누른 채 끌기 = 이동 (표마다 따로 기억).  "
                             "표 밖에서 휠 = 화면 전체를 위아래로"))
@@ -773,6 +814,7 @@ class AgentsTab(QWidget):
         lay.addLayout(bar2)
         lay.addWidget(split, 1)
         lay.addWidget(self.pending_box)
+        self._set_view(board_on, save=False)
 
 
         self.timer = QTimer(self)
@@ -902,6 +944,7 @@ class AgentsTab(QWidget):
                 t.selectRow(r)
         t.blockSignals(False)
         self.sel_label.setText(f"선택한 컴퓨터 {len(self.checked)}대에:")
+        self._render_board()
         self._render_pending()
         self._render_history()
         self.restyle()
@@ -960,6 +1003,59 @@ class AgentsTab(QWidget):
     def _toggle(self, pc_id: int, on: bool) -> None:
         (self.checked.add if on else self.checked.discard)(pc_id)
         self.sel_label.setText(f"선택한 컴퓨터 {len(self.checked)}대에:")
+        card = self.board.cards.get(pc_id)
+        if card:
+            card.set_checked(on)
+
+    # ---------------------------------------------------------------- 현황판
+    def _set_view(self, board: bool, save: bool = True) -> None:
+        self.view.setCurrentIndex(1 if board else 0)
+        self.cols_group.setVisible(board)
+        for lab, on in zip(self.view_labels, (False, True)):
+            lab.setStyleSheet(f"color:{T('ink') if on == board else T('muted')};"
+                              + ("font-weight:bold;" if on == board else ""))
+        if self.view_switch.isChecked() != board:
+            self.view_switch.setChecked(board)
+        if save:
+            _sheet.settings().setValue("pc_view", "board" if board else "table")
+
+    def _set_cols(self, _i: int) -> None:
+        n = self.cols_box.currentData() or 0
+        _sheet.settings().setValue("pc_board_cols", n)
+        self.board.set_fixed_cols(n)
+
+    def _card_check(self, pc_id: int, on: bool) -> None:
+        """카드에서 체크 → 표의 체크칸도 같이."""
+        (self.checked.add if on else self.checked.discard)(pc_id)
+        self.sel_label.setText(f"선택한 컴퓨터 {len(self.checked)}대에:")
+        for r, pc in enumerate(self.pcs):
+            if pc.id == pc_id:
+                w = self.table.cellWidget(r, 0)
+                cb = w.findChild(QCheckBox) if w else None
+                if cb is not None and cb.isChecked() != on:
+                    cb.blockSignals(True)
+                    cb.setChecked(on)
+                    cb.blockSignals(False)
+                break
+
+    def _card_pick(self, pc_id: int) -> None:
+        """카드를 누르면 아래에 그 컴퓨터의 명령 기록."""
+        self.current_pc = pc_id
+        for r, pc in enumerate(self.pcs):
+            if pc.id == pc_id:
+                self.table.blockSignals(True)
+                self.table.selectRow(r)
+                self.table.blockSignals(False)
+                break
+        self._render_history()
+
+    def _render_board(self) -> None:
+        n = self.board.render()
+        dot = lambda key, sym, text, k: (f"<span style='color:{T(key)}'>{sym}</span> {text} <b>{n[k]}</b>")
+        self.legend.setText("&nbsp;&nbsp;&nbsp;".join([
+            dot("success", "●", "켜짐", "on"), dot("accent_text", "●", "작업 중", "busy"),
+            dot("danger", "●", "꺼짐", "off"), dot("faint", "○", "실행기 없음", "none"),
+        ]) + f"&nbsp;&nbsp;&nbsp;<span style='color:{T('muted')}'>· 카드를 누르면 체크(명령 대상) + 아래에 명령 기록</span>")
 
     def _check_all(self, on: bool) -> None:
         self.checked = {p.id for p in self.pcs} if on else set()
@@ -969,6 +1065,7 @@ class AgentsTab(QWidget):
         rows = self.table.selectionModel().selectedRows()
         if rows:
             self.current_pc = self.table.item(rows[0].row(), 1).data(Qt.UserRole)
+            self.board.set_current(self.current_pc)
             self._render_history()
 
     # ---------------------------------------------------------------- 명령
