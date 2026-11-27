@@ -24,6 +24,7 @@ from .common import (
     wheel_only_when_focused, zoom_rows,
 )
 from . import sheet as _sheet
+from .bg import bg, reload_async
 from .pcboard import PcBoard
 from .sheet import SheetNav
 
@@ -819,7 +820,9 @@ class AgentsTab(QWidget):
 
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self._tick)
+        self.timer.timeout.connect(self._tick_async)
+        self._ticking = False
+        self._tick_again = False
 
     # ---------------------------------------------------------------- 데이터
     def showEvent(self, e) -> None:
@@ -832,28 +835,61 @@ class AgentsTab(QWidget):
 
     def refresh(self) -> None:
         """컴퓨터 목록과 계정 이름까지 다시 읽기 (페이지를 열 때, F5)."""
-        self.pcs = self.repo.list_pcs()
-        names = {}
-        for a in self.repo.list_accounts():
-            names[a.id] = f"[{a.provider}] {a.login_id}"
-        self.acc_names = names
+        self.show_data(self.fetch())
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨)."""
+        pcs = self.repo.list_pcs()
+        names = {a.id: f"[{a.provider}] {a.login_id}" for a in self.repo.list_accounts()}
         try:
             self.repo.sync_pc_creds()
         except RepoError:
             pass
-        self._tick()
+        return pcs, names, self._fetch_tick([p.id for p in pcs])
+
+    def show_data(self, data) -> None:
+        self.pcs, self.acc_names, tick = data
+        self._show_tick(tick)
+
+    def _fetch_tick(self, pc_ids: list[int]):
+        return self.repo.list_agents(), self.repo.list_commands(pc_ids)
 
     def _tick(self) -> None:
-        """실행기 상태와 명령 기록만 다시 읽기 (몇 초마다)."""
-        if not self.pcs and self.isVisible():
-            pass
+        """실행기 상태와 명령 기록만 다시 읽기."""
         try:
-            agents = self.repo.list_agents()
-            pc_ids = [p.id for p in self.pcs]
-            cmds = self.repo.list_commands(pc_ids)
+            tick = self._fetch_tick([p.id for p in self.pcs])
         except RepoError as e:
             self.hist_title.setText(f"서버 확인 중: {e}")
             return
+        self._show_tick(tick)
+
+    def _tick_async(self) -> None:
+        """몇 초마다: 뒤에서 읽고 다 읽으면 그린다 (그동안 화면은 멈추지 않음)."""
+        if self._ticking:
+            self._tick_again = True   # 읽는 중이면, 끝나자마자 한 번 더 (방금 바꾼 내용이 바로 보이게)
+            return
+        self._ticking = True
+        self._tick_again = False
+        ids = [p.id for p in self.pcs]
+
+        def ok(tick):
+            self._ticking = False
+            if self._tick_again:
+                self._tick_async()   # 읽는 사이에 바뀐 게 있음 → 예전 결과는 건너뛰고 다시 읽기
+                return
+            if [p.id for p in self.pcs] == ids:   # 그 사이에 컴퓨터 목록이 바뀌었으면 다음 차례에
+                self._show_tick(tick)
+
+        def fail(e):
+            self._ticking = False
+            if self._tick_again:
+                self._tick_async()
+                return
+            self.hist_title.setText(f"서버 확인 중: {e}")
+        bg().run(self.repo, lambda: self._fetch_tick(ids), ok, fail)
+
+    def _show_tick(self, tick) -> None:
+        agents, cmds = tick
         mine = {p.id for p in self.pcs}
         self.agents = {a.pc_id: a for a in agents if a.pc_id in mine}
         tid = getattr(self.repo, "team_id", None)
@@ -1093,20 +1129,32 @@ class AgentsTab(QWidget):
         if len(targets) > 1 and QMessageBox.question(
                 self, "PC 조종", f"{len(targets)}대에 [{kind_label(kind, arg)}] 명령을 보낼까요?") != QMessageBox.Yes:
             return
-        errors = []
-        try:
-            self.repo.sync_pc_creds()  # 로그인 전에 자리 계정이 최신인지
-        except RepoError:
-            pass
-        for p in targets:
+        missing = [f"{p.no}. {p.name}: 연결된 실행기가 없음" for p in no_agent]
+        label = kind_label(kind, arg)
+
+        def send():   # 뒤 작업 줄에서 (여러 대에 보내도 화면이 멈추지 않게)
+            errors = []
             try:
-                self.repo.send_command(p.id, kind, arg)
-            except RepoError as e:
-                errors.append(f"{p.no}. {p.name}: {e}")
-        errors += [f"{p.no}. {p.name}: 연결된 실행기가 없음" for p in no_agent]
-        self._tick()
-        if errors:
-            QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
+                self.repo.sync_pc_creds()  # 로그인 전에 자리 계정이 최신인지
+            except RepoError:
+                pass
+            for p in targets:
+                try:
+                    self.repo.send_command(p.id, kind, arg)
+                except RepoError as e:
+                    errors.append(f"{p.no}. {p.name}: {e}")
+            return errors
+
+        def done(errors):
+            errors = errors + missing
+            self._tick_async()
+            if errors:
+                QMessageBox.warning(self, "일부 못 보냄", "\n".join(errors[:15]))
+
+        def fail(e):
+            QMessageBox.warning(self, "PC 조종", f"명령을 못 보냈어요: {e}")
+        self.hist_title.setText(f"{len(targets)}대에 [{label}] 보내는 중…")
+        bg().run(self.repo, send, done, fail)
 
     def _fix_mac_checked(self) -> None:
         targets = [p for p in self.pcs if p.id in self.checked]
@@ -1135,7 +1183,7 @@ class AgentsTab(QWidget):
                 self.repo.set_pc_mac(p.id, a.mac)
             except RepoError as e:
                 errors.append(f"{p.no}. {p.name}: {e}")
-        self.refresh()
+        reload_async(self)
         self._say(f"MAC 고정: {len(ok) - len(errors)}대")
         if errors:
             QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
@@ -1162,7 +1210,7 @@ class AgentsTab(QWidget):
                 errors.append(f"{p.no}. {p.name}: {e}")
         self.checked = set()
         self.all_box.setChecked(False)
-        self.refresh()
+        reload_async(self)
         if errors:
             QMessageBox.warning(self, "일부 못 함", "\n".join(errors[:15]))
 
@@ -1179,7 +1227,7 @@ class AgentsTab(QWidget):
             return
         dlg = CloudAssignDialog(self.repo, self.pcs, self.agents, devs, self)
         if dlg.exec():
-            self.refresh()
+            reload_async(self)
 
     def _bulk_settings(self) -> None:
         targets = [p for p in self.pcs if p.id in self.checked]
@@ -1189,13 +1237,13 @@ class AgentsTab(QWidget):
         first = targets[0]
         dlg = AgentSettingsDialog(self.repo, first, self.agents.get(first.id), self, bulk=targets)
         if dlg.exec():
-            self.refresh()
+            reload_async(self)
 
     def _settings(self, pc) -> None:
         dlg = AgentSettingsDialog(self.repo, pc, self.agents.get(pc.id), self, all_pcs=self.pcs, linked=set(self.agents),
                                   devices=self._all_devices())
         if dlg.exec():
-            self.refresh()
+            reload_async(self)
 
     # ---------------------------------------------------------------- 아래 칸
     def _render_history(self) -> None:
@@ -1371,7 +1419,7 @@ class AgentsTab(QWidget):
         """연결/지우기를 한 뒤: 고르는 중 여부와 상관없이 연결 대기 목록을 바로 새로 그린다."""
         self._pending_key = None
         self.setFocus()
-        self._tick()
+        self._tick_async()
 
     def _say(self, text: str) -> None:
         w = self.window()

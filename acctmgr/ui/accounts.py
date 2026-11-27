@@ -1,25 +1,106 @@
 """계정 화면: 전체 계정 표, 상태별 필터, 추가/수정/삭제."""
 from __future__ import annotations
 
+import copy
+import time
 from collections import Counter
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
+    QAbstractItemDelegate, QAbstractItemView, QApplication, QButtonGroup, QDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
     QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..db import Repository
+from ..db import Repository, RepoError
 from ..models import (
-    DEFAULT_GAMES, GAMES, set_games, STATUS_AUTH, STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login,
+    DEFAULT_GAMES, GAMES, Character, set_games, STATUS_AUTH, STATUS_AVAILABLE, STATUS_BANNED, STATUS_IN_USE, STATUS_WITHDRAWN, Account, norm_login,
 )
-from .common import FlowLayout, button, copy_text, group, muted, page_header, px, run_safely, style_table
+from .bg import bg, reload_async
+from .common import FlowLayout, GridDelegate, button, copy_text, group, muted, page_header, px, run_safely, style_table
 from .dialogs import AccountDialog, CharacterDialog
 from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, ID_ROLE, SheetNav, cap_widths, fill_account_cells, rebuild_columns
 
 COLUMNS = ACCOUNT_COLUMNS
-CHAR_COLS = ACC_CHAR     # 누르면 캐릭터 창
+CHAR_COLS = ACC_CHAR     # 두 번 누르면 캐릭터 창
+
+# 한 번 눌러서 그 칸만 바로 고칠 수 있는 열 (열 이름 → 계정 필드). 캐릭터 칸(닉, 레벨/직업)도 바로 고침.
+INLINE_FIELDS = {"명의자": "owner", "연락처": "contact", "아이디": "login_id", "비밀번호": "password",
+                 "메월코드": "tag", "비고": "note"}
+
+
+def inline_target(col: int):
+    """그 열을 바로 고칠 수 있으면 ('field', 필드) 또는 ('nick'/'lj', 게임), 아니면 None."""
+    if not 0 <= col < len(ACCOUNT_COLUMNS):
+        return None
+    if col in ACC_CHAR:
+        return ("nick" if ACCOUNT_COLUMNS[col].endswith("닉") else "lj", ACC_CHAR[col])
+    name = ACCOUNT_COLUMNS[col]
+    return ("field", INLINE_FIELDS[name]) if name in INLINE_FIELDS else None
+
+
+def inline_value(a: Account, target) -> str:
+    kind, key = target
+    if kind == "field":
+        return getattr(a, key) or ""
+    cs = a.chars(key)
+    if not cs:
+        return ""
+    return cs[0].nickname if kind == "nick" else cs[0].level_job
+
+
+def inline_apply(a: Account, target, text: str) -> Account | None:
+    """고친 값을 넣은 새 계정 (바뀐 게 없으면 None). 캐릭터 칸은 대표 캐릭터를 고친다 (없으면 새로)."""
+    kind, key = target
+    text = text if (kind == "field" and key in ("password", "note")) else text.strip()
+    if inline_value(a, target) == text:
+        return None
+    q = copy.deepcopy(a)
+    if kind == "field":
+        setattr(q, key, text)
+        return q
+    cs = q.chars(key)
+    if cs:
+        if kind == "nick":
+            cs[0].nickname = text
+        else:
+            cs[0].level_job = text
+    else:
+        q.characters.append(Character(key, text if kind == "nick" else "", text if kind == "lj" else ""))
+    return q
+
+
+class InlineDelegate(GridDelegate):
+    """칸 바로 고치기. 고치는 칸을 곧바로 한 번 더 누르면(=두 번 클릭) 고치기를 그만두고 창을 연다."""
+
+    def __init__(self, tab):
+        super().__init__(tab.table)
+        self.tab = tab
+        self._opened = 0.0
+        self._index = (0, 0)
+
+    def createEditor(self, parent, option, index):
+        ed = QLineEdit(parent)
+        ed.setFrame(False)
+        self._opened = time.monotonic()
+        self._index = (index.row(), index.column())
+        ed.installEventFilter(self)
+        return ed
+
+    def setEditorData(self, editor, index) -> None:
+        editor.setText(self.tab._raw_value(index.row(), index.column()))
+        editor.selectAll()
+
+    def setModelData(self, editor, model, index) -> None:
+        self.tab._commit_cell(index.row(), index.column(), editor.text())
+
+    def eventFilter(self, obj, ev) -> bool:
+        if isinstance(obj, QLineEdit) and ev.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick)                 and time.monotonic() - self._opened < QApplication.doubleClickInterval() / 1000:
+            r, c = self._index
+            self.closeEditor.emit(obj, QAbstractItemDelegate.RevertModelCache)   # 저장하지 않고 닫기
+            QTimer.singleShot(0, lambda: self.tab._open_dialog(r, c))
+            return True
+        return super().eventFilter(obj, ev)
 
 
 def filter_names() -> list[str]:
@@ -96,6 +177,8 @@ class AccountsTab(QWidget):
         self.repo = repo
         self.accs: list[Account] = []
         self.show_pw = False
+        self._edit_seq = 0     # 내가 고칠 때마다 +1 (뒤에서 읽어 온 예전 결과를 버리려고)
+        self._busy_ops = 0     # 서버에 보내 놓고 답을 기다리는 내 고치기 수
         me = repo.me
 
         right = []
@@ -133,9 +216,10 @@ class AccountsTab(QWidget):
         self.table.setHorizontalHeaderLabels(COLUMNS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)   # 바로 고치기는 한 번 누를 때 직접 연다
 
         style_table(self.table)
+        self.table.setItemDelegate(InlineDelegate(self))
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(px(36))
         self.table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)  # 처음엔 상태순(사용중 → 사용가능 → 정지 → 탈퇴)
@@ -146,11 +230,11 @@ class AccountsTab(QWidget):
         hh.setStretchLastSection(True)
         hh.setDefaultAlignment(Qt.AlignCenter)  # 열 제목은 가운데
         self.table.cellClicked.connect(self._cell_clicked)
-        self.table.cellDoubleClicked.connect(lambda r, c: None if c in CHAR_COLS else self._edit())
+        self.table.cellDoubleClicked.connect(self._open_dialog)
         self.table.setMouseTracking(True)
         self.table.cellEntered.connect(
             lambda r, c: None if self.nav.drag else
-            self.table.viewport().setCursor(Qt.PointingHandCursor if c in CHAR_COLS else Qt.ArrowCursor))
+            self.table.viewport().setCursor(Qt.IBeamCursor if self._can_inline(c) else Qt.ArrowCursor))
         self.nav = SheetNav(self.table, "table_zoom", self._render)  # Ctrl+휠 = 표 크기, 휠 누르고 끌기 = 이동
 
         # 아래 줄: 창이 좁으면 [표시 개수·표 크기] 덩어리와 버튼 덩어리가 두 줄로 나뉨 (잘리지 않게)
@@ -208,7 +292,8 @@ class AccountsTab(QWidget):
     def games_changed(self) -> None:
         """게임 목록이 바뀌었을 때: 필터 버튼과 표 열을 다시 만든다."""
         self._build_filters()
-        self.refresh()
+        if self.accs:
+            self.show_data((self.accs, None))   # 받아 둔 데이터로 다시 그리기 (새 내용은 뒤에서 읽음)
 
     def _tests(self) -> dict:
         t = {
@@ -235,9 +320,26 @@ class AccountsTab(QWidget):
             self.games_changed_signal.emit()
 
     def refresh(self) -> None:
-        self.accs = self.repo.list_accounts()
-        if self.show_worker:
-            self.worker_names = {w.id: w.display_name for w in self.repo.list_workers()}
+        self.show_data(self.fetch())
+
+    def _after_change(self) -> None:
+        """저장한 뒤: 다시 읽기는 뒤에서 (화면이 멈추지 않게)."""
+        self.changed.emit()
+        reload_async(self)
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨). 읽기 시작할 때의 '내 고치기 번호'도 같이."""
+        seq = self._edit_seq
+        names = {w.id: w.display_name for w in self.repo.list_workers()} if self.show_worker else None
+        return self.repo.list_accounts(), names, seq
+
+    def show_data(self, data) -> None:
+        accs, names = data[0], data[1]
+        if len(data) > 2 and (data[2] != self._edit_seq or self._busy_ops):
+            return   # 읽는 사이에 내가 또 고침 → 예전 결과 (화면엔 이미 새 내용이 있음)
+        self.accs = accs
+        if names is not None:
+            self.worker_names = names
         keys = Counter(norm_login(a.login_id) for a in self.accs)
         self.dups = {a.id for a in self.accs if keys[norm_login(a.login_id)] > 1}
         tests = self._tests()
@@ -276,16 +378,85 @@ class AccountsTab(QWidget):
         self.table.setSortingEnabled(True)
         cap_widths(self.table, 0, self.nav.zoom)
         self.tzoom_btn.setText(self.nav.label())
-        self.count_label.setText(f"{len(rows)}개 표시 · 캐릭터 칸을 누르면 캐릭터 창이 열려요")
+        self.count_label.setText(f"{len(rows)}개 표시 · 칸을 한 번 누르면 그 칸만 바로 수정 (Enter = 저장, Esc = 취소) · 두 번 누르면 수정 창 (캐릭터 칸은 캐릭터 창)")
+
+    # ---------------------------------------------------------------- 칸 바로 고치기
+    def _row_account(self, r: int) -> Account | None:
+        it = self.table.item(r, 0)
+        aid = it.data(ID_ROLE) if it else None
+        return next((x for x in self.accs if x.id == aid), None) if aid is not None else None
+
+    def _can_inline(self, c: int) -> bool:
+        return self.repo.me.can("can_edit_account") and inline_target(c) is not None
 
     def _cell_clicked(self, r: int, c: int) -> None:
-        if c not in CHAR_COLS:
+        """한 번 누르면 그 칸만 바로 고치기 (고칠 수 없는 칸은 그 줄만 골라짐)."""
+        if not self._can_inline(c):
             return
-        it = self.table.item(r, 0)
-        a = next((x for x in self.accs if it and x.id == it.data(ID_ROLE)), None)
-        if a and CharacterDialog(self.repo, a, CHAR_COLS[c], self).exec():
-            self.refresh()
-            self.changed.emit()
+        a = self._row_account(r)
+        if a is None or a.delete_requested:
+            return
+        it = self.table.item(r, c)
+        if it is not None:
+            self.table.editItem(it)
+
+    def _raw_value(self, r: int, c: int) -> str:
+        a, target = self._row_account(r), inline_target(c)
+        return inline_value(a, target) if a and target else ""
+
+    def _commit_cell(self, r: int, c: int, text: str) -> None:
+        a, target = self._row_account(r), inline_target(c)
+        if a is None or target is None:
+            return
+        aid = a.id
+        QTimer.singleShot(0, lambda: self._save_inline(aid, target, text))   # 고치기 칸이 닫힌 뒤에
+
+    def _save_inline(self, aid: int, target, text: str) -> None:
+        """화면은 바로 바꾸고, 서버 저장은 뒤에서. 실패하면 알려 주고 서버 내용으로 되돌린다."""
+        i = next((k for k, x in enumerate(self.accs) if x.id == aid), None)
+        if i is None:
+            return
+        old = self.accs[i]
+        q = inline_apply(old, target, text)
+        if q is None:
+            return
+        if target == ("field", "login_id") and not q.login_id:
+            QMessageBox.information(self, "아이디", "아이디는 비울 수 없어요.")
+            self._render()
+            return
+        send = copy.deepcopy(q)            # 서버로 보낼 것 (지금 버전으로)
+        q.version = old.version + 1        # 서버가 저장하면 버전이 1 오름 → 연달아 고쳐도 충돌 안 나게 미리 맞춤
+        self.accs[i] = q
+        self._edit_seq += 1
+        self._busy_ops += 1
+        self.show_data((self.accs, None))
+
+        def ok(_r) -> None:
+            self._busy_ops -= 1
+            if not self._busy_ops:
+                self._after_change()
+
+        def fail(e) -> None:
+            self._busy_ops -= 1
+            self._edit_seq += 1
+            QMessageBox.warning(self, "저장 안 됨", (str(e) if isinstance(e, RepoError) else f"오류: {e}")
+                                + "\n\n서버에 저장되지 않아서 원래대로 되돌려요.")
+            if not self._busy_ops:
+                reload_async(self)
+        bg().run(self.repo, lambda: self.repo.save_account(send), ok, fail)
+
+    def _open_dialog(self, r: int, c: int) -> None:
+        """두 번 누르면: 캐릭터 칸은 캐릭터 창, 나머지는 계정 수정 창."""
+        a = self._row_account(r)
+        if a is None:
+            return
+        self.table.selectRow(r)
+        if c in CHAR_COLS:
+            if CharacterDialog(self.repo, a, CHAR_COLS[c], self).exec():
+                self._after_change()
+            return
+        if AccountDialog(self.repo, a, self).exec():
+            self._after_change()
 
     def _current(self) -> Account | None:
         r = self.table.currentRow()
@@ -297,16 +468,14 @@ class AccountsTab(QWidget):
 
     def _add(self) -> None:
         if AccountDialog(self.repo, None, self).exec():
-            self.refresh()
-            self.changed.emit()
+            self._after_change()
 
     def _edit(self) -> None:
         a = self._current()
         if not a:
             return
         if AccountDialog(self.repo, a, self).exec():
-            self.refresh()
-            self.changed.emit()
+            self._after_change()
 
     def _delete(self) -> None:
         a = self._current()
@@ -318,8 +487,7 @@ class AccountsTab(QWidget):
                    "관리자가 거절하면 다시 나타나요.")
             if QMessageBox.question(self, "삭제 요청", msg) == QMessageBox.Yes:
                 if run_safely(self, self.repo.delete_account, a.id):
-                    self.refresh()
-                    self.changed.emit()
+                    self._after_change()
             return
         msg = f"[{a.provider}] {a.login_id} ({a.owner}) 계정을 삭제할까요?\n삭제하면 되돌릴 수 없어요."
         if a.location:
@@ -327,8 +495,7 @@ class AccountsTab(QWidget):
         msg += "\n\n그만 쓰는 계정이면 삭제 대신 '탈퇴'로 표시하는 방법도 있어요."
         if QMessageBox.question(self, "계정 삭제", msg) == QMessageBox.Yes:
             if run_safely(self, self.repo.delete_account, a.id):
-                self.refresh()
-                self.changed.emit()
+                self._after_change()
 
     def _approve(self) -> None:
         a = self._current()
@@ -338,8 +505,7 @@ class AccountsTab(QWidget):
         if QMessageBox.question(self, "삭제 승인",
                                 f"[{a.provider}] {a.login_id} ({a.owner}) 계정을 완전히 삭제할까요?\n되돌릴 수 없어요.") \
                 == QMessageBox.Yes and run_safely(self, self.repo.approve_delete, a.id):
-            self.refresh()
-            self.changed.emit()
+            self._after_change()
 
     def _reject(self) -> None:
         a = self._current()
@@ -350,8 +516,7 @@ class AccountsTab(QWidget):
             QMessageBox.information(self, "삭제 거절",
                                     "삭제 요청을 거절했어요. 근무자 화면에 다시 보여요.\n"
                                     "원래 들어 있던 자리가 비어 있으면 그 자리로 되돌려 놓았어요.")
-            self.refresh()
-            self.changed.emit()
+            self._after_change()
 
     def _copy(self, what: str) -> None:
         a = self._current()

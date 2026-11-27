@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from .bg import reload_async
 from .common import button, copy_text, fit_columns, page_header, px, run_safely, style_table, zoom_rows
 from .sheet import SheetNav
 
@@ -57,10 +58,16 @@ class TeamsTab(QWidget):
         lay.addWidget(self.table, 1)
 
     def refresh(self) -> None:
+        self.show_data(self.fetch())
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨)."""
+        teams = self.repo.list_teams()
+        return teams, self.repo.list_workers(), self.repo.team_counts(teams)
+
+    def show_data(self, data) -> None:
         repo = self.repo
-        repo.teams = repo.list_teams()
-        people = repo.list_workers()
-        counts = repo.team_counts()
+        repo.teams, people, counts = data
         self.table.setRowCount(len(repo.teams))
         for r, t in enumerate(repo.teams):
             name = QTableWidgetItem(t.name)
@@ -104,7 +111,7 @@ class TeamsTab(QWidget):
                                 "예전 코드로는 더 이상 이 팀에 들어올 수 없어요. (이미 들어온 실행기는 그대로예요)") != QMessageBox.Yes:
             return
         if run_safely(self, self.repo.new_join_code, t.id):
-            self.refresh()
+            reload_async(self)
 
     def restyle(self) -> None:
         self.table.verticalHeader().setDefaultSectionSize(zoom_rows(getattr(self, "nav", None), 44))
@@ -115,8 +122,8 @@ class TeamsTab(QWidget):
         if not ok or not name.strip():
             return
         if run_safely(self, self.repo.create_team, name.strip()):
-            self.refresh()
             self.changed.emit()
+            reload_async(self)
             QMessageBox.information(self, "팀 추가", f"'{name.strip()}' 팀을 만들었어요.\n"
                                     "왼쪽 위 팀 선택에서 이 팀으로 바꾼 뒤 컴퓨터와 계정을 넣으세요.\n"
                                     "사람은 '근무자 관리'에서 이 팀에 넣을 수 있어요.")
@@ -126,13 +133,13 @@ class TeamsTab(QWidget):
         if not name or name == t.name:
             return
         if run_safely(self, self.repo.rename_team, t.id, name):
-            self.refresh()
             self.changed.emit()
+            reload_async(self)
 
     def _delete(self, t) -> None:
         if QMessageBox.question(self, "팀 삭제",
                                 f"'{t.name}' 팀을 삭제할까요?\n이 팀에만 속한 사람은 '승인 대기'로 돌아가요.") != QMessageBox.Yes:
             return
         if run_safely(self, self.repo.delete_team, t.id):
-            self.refresh()
             self.changed.emit()
+            reload_async(self)

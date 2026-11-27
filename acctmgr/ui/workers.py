@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel, QMessageBox, QPushButton, QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .bg import reload_async
 from ..cloud import LOGIN_DOMAIN
 from ..db import RepoError
 from ..models import ADMIN_ALWAYS, PERMS, ROLES, Profile
@@ -163,8 +164,15 @@ class WorkersTab(QWidget):
 
     # ---------------------------------------------------------------- 표
     def refresh(self) -> None:
+        self.show_data(self.fetch())
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨)."""
+        return self.repo.list_workers()
+
+    def show_data(self, workers) -> None:
         order = {"super": 0, "admin": 1, "worker": 2, "pending": 3}
-        self.workers = sorted(self.repo.list_workers(), key=lambda p: order.get(p.role, 9))
+        self.workers = sorted(workers, key=lambda p: order.get(p.role, 9))
         me = self.repo.me
         self.table.setRowCount(len(self.workers))
         for r, p in enumerate(self.workers):
@@ -274,5 +282,5 @@ class WorkersTab(QWidget):
                 self.repo.grant_missing_keys()  # 새로 들어온 팀의 열쇠를 바로 넘겨준다
             except RepoError:
                 pass
-            self.refresh()
             self.changed.emit()
+            reload_async(self)

@@ -12,11 +12,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..models import GAMES, PC, PROVIDERS, Account, owner_rule_violation
+from .. import logsetup
+from ..db import RepoError
+from ..models import GAMES, PC, PROVIDERS, Account, Location, owner_rule_violation
 from .common import (
     GridDelegate, StatCard, T, badge, button, copy_text, label, muted, page_header, px, run_safely, style_table,
     vline,
 )
+from .bg import bg
 from .dialogs import AccountDialog, CharacterDialog, PcDialog
 from .sheet import ACC_CHAR, ACCOUNT_COLUMNS, GROUP_END_ROLE, SheetNav, cap_widths, fill_account_cells
 
@@ -138,6 +141,8 @@ class WorkplaceTab(QWidget):
         self.selected: tuple[int, int] | None = None
         self.selected_cell: tuple[int, int] | None = None  # (컴퓨터 id, 열): 컴퓨터 정보 칸 하나를 고른 경우
         self.worker_names: dict[str | None, str] = {}  # 클라우드 관리자에게만 담당자 표시
+        self._edit_seq = 0     # 내가 바꿀 때마다 +1 (뒤에서 읽어 온 예전 결과를 버리려고)
+        self._busy_ops = 0     # 서버에 보내 놓고 답을 기다리는 내 변경 수
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 20)
@@ -244,10 +249,27 @@ class WorkplaceTab(QWidget):
 
     # ---------------------------------------------------------------- 데이터
     def refresh(self) -> None:
-        self.pcs = self.repo.list_pcs()
-        self.accs = {a.id: a for a in self.repo.list_accounts()}
-        if self.repo.is_cloud and self.repo.me.is_admin:
-            self.worker_names = {w.id: w.display_name for w in self.repo.list_workers()}
+        self.show_data(self.fetch())
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨). 읽기 시작할 때의 '내 변경 번호'도 같이."""
+        seq = self._edit_seq
+        names = ({w.id: w.display_name for w in self.repo.list_workers()}
+                 if self.repo.is_cloud and self.repo.me.is_admin else None)
+        return seq, self.repo.list_pcs(), self.repo.list_accounts(), names
+
+    def show_data(self, data) -> None:
+        seq, pcs, accs, names = data
+        if seq != self._edit_seq or self._busy_ops:
+            return   # 읽는 사이에 내가 또 바꿈 → 이 결과는 예전 것 (화면엔 이미 새 내용이 있음)
+        self.pcs = pcs
+        self.accs = {a.id: a for a in accs}
+        if names is not None:
+            self.worker_names = names
+        self._redraw()
+
+    def _redraw(self) -> None:
+        """가진 데이터로 화면만 다시 그리기 (서버 조회 없음)."""
         if self.selected:
             pc = self._pc(self.selected[0])
             if not pc or self.selected[1] > len(pc.slots):
@@ -276,8 +298,53 @@ class WorkplaceTab(QWidget):
         return next((p for p in self.pcs if p.id == pc_id), None)
 
     def _after_change(self) -> None:
-        self.refresh()
+        """서버에 저장한 뒤: 다시 읽기는 뒤에서 (화면이 멈추지 않게)."""
         self.changed.emit()
+        self.reload_later()
+
+    def reload_later(self) -> None:
+        def fail(e):
+            logsetup.log.warning("작업장 다시 읽기 실패: %s", e)
+        bg().run(self.repo, self.fetch, self.show_data, fail)
+
+    def _server(self, what: str, fn, *args) -> None:
+        """화면은 이미 바꿔 둔 상태에서, 서버 저장은 뒤에서. 실패하면 알려 주고 서버 내용으로 되돌린다."""
+        self._edit_seq += 1
+        self._busy_ops += 1
+
+        def ok(_r):
+            self._busy_ops -= 1
+            if not self._busy_ops:
+                self.changed.emit()
+                self.reload_later()   # 서버가 정한 최종 상태로 맞춰 둔다 (보통은 화면과 같음)
+
+        def fail(e):
+            self._busy_ops -= 1
+            self._edit_seq += 1
+            QMessageBox.warning(self, what, (str(e) if isinstance(e, RepoError) else f"오류: {e}")
+                                + "\n\n서버에 저장되지 않아서 원래대로 되돌려요.")
+            if not self._busy_ops:
+                self.reload_later()
+        bg().run(self.repo, lambda: fn(*args), ok, fail)
+
+    # 서버 답을 기다리지 않고 화면부터 바꾸기
+    def _put_local(self, pc_id: int, slot: int, aid: int) -> None:
+        pc, acc = self._pc(pc_id), self.accs.get(aid)
+        if pc is None or acc is None or not (1 <= slot <= len(pc.slots)):
+            return
+        if acc.location:
+            self._take_local(acc.location.pc_id, acc.location.slot)
+        pc.slots[slot - 1] = aid
+        acc.location = Location(pc.id, pc.no, pc.name, slot)
+
+    def _take_local(self, pc_id: int, slot: int) -> None:
+        pc = self._pc(pc_id)
+        if pc is None or not (1 <= slot <= len(pc.slots)):
+            return
+        aid = pc.slots[slot - 1]
+        pc.slots[slot - 1] = None
+        if aid in self.accs:
+            self.accs[aid].location = None
 
     # ---------------------------------------------------------------- 목록
     def _visible_pcs(self) -> list[PC]:
@@ -475,7 +542,7 @@ class WorkplaceTab(QWidget):
         if run_safely(self, self.repo.save_pc, q):
             self._after_change()
         else:
-            self.refresh()
+            self.reload_later()
 
     def eventFilter(self, obj, ev) -> bool:
         if obj is self.table and ev.type() == QEvent.KeyPress:
@@ -569,8 +636,7 @@ class WorkplaceTab(QWidget):
                                 f"이제 {pc.no}번 = {other.name}, {other.no}번 = {pc.name} 이 돼요. 바꿀까요?") != QMessageBox.Yes:
             return
         if run_safely(self, self.repo.swap_pc_numbers, pc.id, other.id):
-            self.refresh()
-            self.changed.emit()
+            self._after_change()
 
     def _pc_tools(self, pc: PC) -> None:
         """패널 맨 위: 이 컴퓨터 수정, 자리 추가/삭제."""
@@ -783,17 +849,19 @@ class WorkplaceTab(QWidget):
         if not aid or not self.selected:
             QMessageBox.information(self, "계정 선택", "넣을 계정을 목록에서 고르세요.")
             return
-        if run_safely(self, self.repo.assign, self.selected[0], self.selected[1], aid):
-            self._after_change()
-        else:
-            self.refresh()
+        pc_id, slot = self.selected
+        self._put_local(pc_id, slot, aid)
+        self._redraw()
+        self._server("계정 넣기", self.repo.assign, pc_id, slot, aid)
 
     def _unassign(self, a: Account) -> None:
         if QMessageBox.question(self, "자리에서 빼기",
                                 f"{a.location.text()}에서 {a.login_id} 계정을 뺄까요?\n계정은 '사용가능'으로 돌아가요.") \
                 == QMessageBox.Yes:
-            run_safely(self, self.repo.unassign, a.location.pc_id, a.location.slot)
-            self._after_change()
+            pc_id, slot = a.location.pc_id, a.location.slot
+            self._take_local(pc_id, slot)
+            self._redraw()
+            self._server("자리에서 빼기", self.repo.unassign, pc_id, slot)
 
     def _move(self, a: Account) -> None:
         empties = [(p, i) for p in self.pcs for i, x in enumerate(p.slots, start=1) if x is None]
@@ -804,9 +872,10 @@ class WorkplaceTab(QWidget):
         choice, ok = QInputDialog.getItem(self, "다른 자리로 옮기기", f"{a.login_id} 계정을 옮길 자리", labels, 0, False)
         if ok:
             p, i = empties[labels.index(choice)]
-            if run_safely(self, self.repo.move, a.id, p.id, i):
-                self.selected = (p.id, i)
-            self._after_change()
+            self._put_local(p.id, i, a.id)
+            self.selected = (p.id, i)
+            self._redraw()
+            self._server("다른 자리로 옮기기", self.repo.move, a.id, p.id, i)
 
     def change_slots(self, pc: PC, delta: int) -> None:
         """자리 추가(+1) / 맨 아래 자리 삭제(-1). 최소 MIN_SLOTS개."""
@@ -822,7 +891,7 @@ class WorkplaceTab(QWidget):
         if run_safely(self, self.repo.save_pc, q):
             self._after_change()
         else:
-            self.refresh()
+            self.reload_later()
 
     def edit_pc(self, pc: PC | None) -> None:
         next_no = max((p.no for p in self.pcs), default=0) + 1

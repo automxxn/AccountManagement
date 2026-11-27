@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -39,6 +40,7 @@ class CloudRepository:
         self.url = url.rstrip("/")
         self.anon_key = anon_key.strip()
         self.http = httpx.Client(timeout=20)
+        self._auth_lock = threading.RLock()   # 화면 줄과 뒤 작업 줄이 동시에 로그인을 새로 받지 않게
         self.access_token: str | None = None
         self.refresh_token: str | None = None
         self.user_id: str | None = None
@@ -75,12 +77,15 @@ class CloudRepository:
         return h
 
     def _request(self, method: str, path: str, *, retry: bool = True, **kw):
+        used = self.access_token
         try:
             r = self.http.request(method, self.url + path, headers=self._headers(), **kw)
         except httpx.HTTPError:
             raise RepoError("서버에 연결할 수 없어요. 인터넷 연결과 연결 설정(주소)을 확인하세요.")
         if r.status_code == 401 and retry and self.refresh_token and not path.startswith("/auth/"):
-            self._refresh()
+            with self._auth_lock:
+                if self.access_token == used:   # 다른 줄이 이미 새로 받았으면 그걸 쓴다
+                    self._refresh()
             return self._request(method, path, retry=False, **kw)
         if r.status_code >= 400:
             raise self._error(r)
@@ -357,13 +362,17 @@ class CloudRepository:
         self.teams = self.list_teams()
         self._pick_team()
 
-    def team_counts(self) -> dict:
+    def team_counts(self, teams: list | None = None) -> dict:
         """팀 id → (컴퓨터 수, 계정 수). 총관리자용."""
+        pcs: dict = {}
+        accs: dict = {}
+        for r in self._get("pcs", {"select": "team_id"}):
+            pcs[r["team_id"]] = pcs.get(r["team_id"], 0) + 1
+        for r in self._get("accounts", {"select": "team_id"}):
+            accs[r["team_id"]] = accs.get(r["team_id"], 0) + 1
         out = {}
-        for t in self.teams:
-            pcs = self._get("pcs", {"select": "id", "team_id": f"eq.{t.id}"})
-            accs = self._get("accounts", {"select": "id", "team_id": f"eq.{t.id}"})
-            out[t.id] = (len(pcs), len(accs))
+        for t in (self.teams if teams is None else teams):
+            out[t.id] = (pcs.get(t.id, 0), accs.get(t.id, 0))
         return out
 
     def _team_filter(self) -> dict:

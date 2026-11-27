@@ -15,6 +15,7 @@ from ..models import GAMES, ROLES, set_games
 from ..version import __version__
 from .accounts import AccountsTab
 from .agents import AgentsTab
+from .bg import bg
 from .common import (
     ToggleSwitch, ZOOM_STEP, apply_appearance, button, label, muted, page_header, px, scale, style_table, theme,
     zoom_rows,
@@ -58,7 +59,13 @@ class HistoryTab(QWidget):
         self.table.resizeColumnsToContents()
 
     def refresh(self) -> None:
-        rows = self.repo.list_log()
+        self.show_data(self.fetch())
+
+    def fetch(self):
+        """서버에서 읽기만 (뒤 작업 줄에서 불러도 됨)."""
+        return self.repo.list_log()
+
+    def show_data(self, rows) -> None:
         self.table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             for c, key in enumerate(("at", "actor", "action", "detail")):
@@ -71,6 +78,9 @@ class MainWindow(QMainWindow):
     def __init__(self, repo, banner: str = ""):
         super().__init__()
         self.repo = repo
+        self._loading: set = set()     # 뒤에서 다시 읽는 중인 메뉴
+        self._again: set = set()       # 읽는 중에 다시 읽어 달라고 한 메뉴
+        self._polling = False
         self.banner_text = banner          # 근무자 시점 보기 창이면 위에 띠를 보여줌
         self._view_windows = []
         self.cloud = repo.is_cloud
@@ -137,7 +147,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
 
         self._last_change = None
-        self.refresh_all()
+        self.refresh_all(wait=True)
         if self.cloud:
             self.timer = QTimer(self)
             self.timer.timeout.connect(self._poll)
@@ -200,10 +210,10 @@ class MainWindow(QMainWindow):
         pl.addLayout(zr)
         lay.addWidget(pref)
 
-        lay.addWidget(button("새로고침  (F5)", "", self.refresh_all))
+        lay.addWidget(button("새로고침  (F5)", "", lambda: self.refresh_all()))
         act = QAction(self)
         act.setShortcut("F5")
-        act.triggered.connect(self.refresh_all)
+        act.triggered.connect(lambda: self.refresh_all())
         self.addAction(act)
 
         user = QFrame()
@@ -268,7 +278,7 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         self.stack.setCurrentIndex(row)
-        self._safe(self.stack.currentWidget().refresh)
+        self._reload(self.stack.currentWidget())   # 받아 둔 내용을 바로 보여 주고, 새 내용은 뒤에서 읽어 바꿈
 
     # ---------------------------------------------------------------- 공통
     def _ask_actor(self, first: bool = False) -> str:
@@ -300,6 +310,9 @@ class MainWindow(QMainWindow):
             games = self.repo.list_games()
         except RepoError:
             return False
+        return self._set_games(games)
+
+    def _set_games(self, games) -> bool:
         before = list(GAMES)
         set_games(games)
         rebuild_columns()
@@ -337,65 +350,136 @@ class MainWindow(QMainWindow):
         self._games_changed()
         self.refresh_all()
 
-    def refresh_all(self) -> None:
-        if self.cloud:
-            before = self.repo.team_id
-            try:
-                self.repo.reopen_keys()   # 팀이 추가/삭제되거나 열쇠를 새로 받았을 수 있음
-                self.repo.grant_missing_keys()
-            except RepoError as e:
-                logsetup.log.warning("팀 열쇠 확인 실패: %s", e)
-            self._fill_team_box()
-            if self.repo.team_id is None and self.repo.usable_teams() == [] and hasattr(self.repo, "ciphers"):
-                QMessageBox.information(self, "팀", "볼 수 있는 팀이 없어요. 프로그램을 다시 시작하세요.")
-                QApplication.quit()
-                return
-            if self.repo.team_id != before:
-                self._update_title()
-        if self._load_games():  # 다른 PC에서 관리자가 게임을 추가한 경우
-            self.accounts._build_filters()
+    def refresh_all(self, wait: bool = False) -> None:
+        """전부 다시 읽기. 서버 읽기는 뒤 작업 줄에서 하고(화면이 멈추지 않게), 다 읽으면 그린다.
+        wait=True(창을 처음 열 때)면 기다렸다가 모든 메뉴를 채운다."""
+        pages = [t for _, t in self.pages] if wait else [self.stack.currentWidget()]
+        pages = [t for t in pages if t is not None]
+        before = self.repo.team_id if self.cloud else None
 
-        def go():
-            for _, t in self.pages:
-                t.refresh()
-            self._last_change = self.repo.last_change()
-        self._safe(go)
+        def fetch():
+            if self.cloud:
+                try:
+                    self.repo.reopen_keys()   # 팀이 추가/삭제되거나 열쇠를 새로 받았을 수 있음
+                    self.repo.grant_missing_keys()
+                except RepoError as e:
+                    logsetup.log.warning("팀 열쇠 확인 실패: %s", e)
+            try:
+                games = self.repo.list_games()
+            except RepoError:
+                games = None
+            return games, [(t, t.fetch()) for t in pages], self.repo.last_change()
+
+        def done(res) -> None:
+            games, datas, last = res
+            if self.cloud:
+                self._fill_team_box()
+                if self.repo.team_id is None and self.repo.usable_teams() == [] and hasattr(self.repo, "ciphers"):
+                    QMessageBox.information(self, "팀", "볼 수 있는 팀이 없어요. 프로그램을 다시 시작하세요.")
+                    QApplication.quit()
+                    return
+                if self.repo.team_id != before:
+                    self._update_title()
+            if games is not None and self._set_games(games):  # 다른 PC에서 관리자가 게임을 추가한 경우
+                self.accounts._build_filters()
+            for t, data in datas:
+                t.show_data(data)
+            self._last_change = last
+
+        def fail(e) -> None:
+            if not isinstance(e, RepoError):
+                raise e
+            logsetup.log.warning("새로고침 실패: %s", e)
+            self.statusBar().showMessage(f"새로고침 실패: {e}", 10000)
+
+        if wait:
+            try:
+                res = fetch()
+            except RepoError as e:
+                fail(e)
+                return
+            done(res)
+        else:
+            bg().run(self.repo, fetch, done, fail)
+
+    def _reload(self, page) -> None:
+        """그 메뉴만 뒤에서 다시 읽고, 다 읽으면 그린다 (이미 읽는 중이면 또 안 읽음)."""
+        if page is None:
+            return
+        if page in self._loading:
+            self._again.add(page)   # 읽는 중이면 끝나자마자 한 번 더
+            return
+        self._loading.add(page)
+
+        def done(data) -> None:
+            self._loading.discard(page)
+            if page in self._again:
+                self._again.discard(page)
+                self._reload(page)
+                return
+            page.show_data(data)
+
+        def fail(e) -> None:
+            self._loading.discard(page)
+            if page in self._again:
+                self._again.discard(page)
+                self._reload(page)
+                return
+            logsetup.log.warning("새로고침 실패: %s", e)
+            self.statusBar().showMessage(f"새로고침 실패: {e}", 10000)
+        bg().run(self.repo, page.fetch, done, fail)
+
+    def closeEvent(self, e) -> None:
+        # 방금 누른 저장이 아직 서버로 가는 중이면 끝날 때까지 잠깐 기다렸다가 닫는다 (저장이 사라지지 않게)
+        if bg().pending:
+            self.statusBar().showMessage("저장 마무리하는 중…")
+            bg().wait(15)
+        super().closeEvent(e)
 
     def _after_change(self) -> None:
-        def go():
-            for _, t in self.pages:
-                if t is not self.stack.currentWidget():
-                    t.refresh()
-            self._last_change = self.repo.last_change()
-        self._safe(go)
+        """내가 무언가 바꾼 뒤: 다른 메뉴는 열 때 다시 읽으므로 여기선 '마지막 변경 번호'만 (뒤에서)."""
+        def done(n) -> None:
+            self._last_change = n
+        bg().run(self.repo, self.repo.last_change, done, lambda e: logsetup.log.warning("변경 번호 확인 실패: %s", e))
 
     def _poll(self) -> None:
-        if self.repo.me.is_admin:
-            # 팀 열쇠를 기다리는 사람이 있으면 넘겨준다 (근무자가 로그인한 뒤 몇 초 안에 받게).
-            # 화면은 건드리지 않으므로 수정 창이 열려 있어도 한다.
-            try:
-                given = self.repo.grant_missing_keys()
-            except RepoError as e:
-                logsetup.log.warning("팀 열쇠 넘겨주기 실패: %s", e)
-                given = 0
+        """몇 초마다: 팀 열쇠 넘겨주기, 실행기에 자리 계정 올리기, 다른 사람이 바꿨는지 확인 — 모두 뒤에서."""
+        if self._polling:
+            return
+        self._polling = True
+        admin, agents = self.repo.me.is_admin, bool(self.agents_tab)
+
+        def fetch():
+            given = 0
+            if admin:
+                # 팀 열쇠를 기다리는 사람이 있으면 넘겨준다 (근무자가 로그인한 뒤 몇 초 안에 받게)
+                try:
+                    given = self.repo.grant_missing_keys()
+                except RepoError as e:
+                    logsetup.log.warning("팀 열쇠 넘겨주기 실패: %s", e)
+            if agents:
+                # 작업장 자리 계정이 바뀌었으면 그 PC 실행기에 새 계정을 잠가서 올려 둔다 (A/B 로그인용)
+                try:
+                    self.repo.sync_pc_creds()
+                except RepoError as e:
+                    logsetup.log.warning("PC 계정 올리기 실패: %s", e)
+            return given, self.repo.last_change()
+
+        def done(res) -> None:
+            self._polling = False
+            given, n = res
             if given:
                 self.statusBar().showMessage(f"{given}명에게 팀 열쇠를 넘겨줬어요.", 8000)
-        if self.agents_tab:
-            # 작업장 자리 계정이 바뀌었으면 그 PC 실행기에 새 계정을 잠가서 올려 둔다 (A/B 로그인용)
-            try:
-                self.repo.sync_pc_creds()
-            except RepoError as e:
-                logsetup.log.warning("PC 계정 올리기 실패: %s", e)
-        if QApplication.activeModalWidget():
-            return  # 수정 창이 열려 있을 때는 화면을 건드리지 않는다
-        try:
-            n = self.repo.last_change()
-        except RepoError as e:
+            if QApplication.activeModalWidget() or bg().pending:
+                return  # 수정 창이 열려 있거나 내 저장이 아직 진행 중이면 다음 차례에
+            if n != self._last_change:
+                self.refresh_all()
+                self.statusBar().showMessage("다른 사람이 바꾼 내용을 반영했어요.", 5000)
+
+        def fail(e) -> None:
+            self._polling = False
             self.statusBar().showMessage(f"서버 연결 확인 중: {e}", 10000)
-            return
-        if n != self._last_change:
-            self.refresh_all()
-            self.statusBar().showMessage("다른 사람이 바꾼 내용을 반영했어요.", 5000)
+        bg().run(self.repo, fetch, done, fail)
 
     def _check_update(self) -> None:
         if manual_check(self):
