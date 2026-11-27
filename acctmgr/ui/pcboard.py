@@ -5,10 +5,10 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
-    QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from ..models import COMMAND_STATUS
@@ -135,6 +135,71 @@ class PcCard(QFrame):
         _repolish(self, current=on)
 
 
+class _BoardNav(QObject):
+    """현황판 이동 (표와 같은 느낌, 크기 조절은 없음).
+    휠 = 위아래, Shift+휠(또는 좌우 휠) = 좌우, 휠 버튼 누른 채 끌기 = 상하좌우.
+    현황판 안에서 휠은 현황판만 움직인다 (끝에 닿아도 화면 전체로 넘기지 않음. 움직일 게 없으면 화면 전체가 받음)."""
+
+    def __init__(self, area: QScrollArea):
+        super().__init__(area)
+        self.area = area
+        self.drag = None
+        area.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, ev) -> bool:
+        try:
+            return self._handle(obj, ev)
+        except (RuntimeError, AttributeError):
+            return False
+
+    def _handle(self, obj, ev) -> bool:
+        a = self.area
+        t = ev.type()
+        if t == QEvent.Wheel:
+            if ev.modifiers() & Qt.ControlModifier:
+                return False
+            d = ev.pixelDelta()
+            pixels = not d.isNull()
+            if not pixels:
+                d = ev.angleDelta()
+            dx, dy = d.x(), d.y()
+            if ev.modifiers() & Qt.ShiftModifier and dx == 0:
+                dx, dy = dy, 0
+            horiz = abs(dx) > abs(dy)
+            bar = a.horizontalScrollBar() if horiz else a.verticalScrollBar()
+            if bar.maximum() <= bar.minimum():
+                return False
+            delta = dx if horiz else dy
+            if not pixels:
+                delta = delta / 120 * QApplication.wheelScrollLines() * px(24)
+            bar.setValue(round(bar.value() - delta))
+            ev.accept()
+            return True
+        if t == QEvent.MouseButtonPress and ev.button() == Qt.MiddleButton:
+            self.drag = (ev.globalPosition().toPoint(), a.horizontalScrollBar().value(), a.verticalScrollBar().value())
+            obj.setCursor(Qt.SizeAllCursor)
+            obj.grabMouse()
+            return True
+        if t == QEvent.MouseMove and self.drag:
+            if not (ev.buttons() & Qt.MiddleButton):   # 버튼 뗀 신호를 놓친 경우
+                self._end(obj)
+                return False
+            start, h0, v0 = self.drag
+            d = ev.globalPosition().toPoint() - start
+            a.horizontalScrollBar().setValue(h0 - d.x())
+            a.verticalScrollBar().setValue(v0 - d.y())
+            return True
+        if t == QEvent.MouseButtonRelease and ev.button() == Qt.MiddleButton and self.drag:
+            self._end(obj)
+            return True
+        return False
+
+    def _end(self, obj) -> None:
+        self.drag = None
+        obj.releaseMouse()
+        obj.unsetCursor()
+
+
 class PcBoard(QScrollArea):
     """카드들을 가로 N칸으로 깔아 둔다 (N = '자동'이면 창 폭에 맞춰)."""
 
@@ -155,6 +220,7 @@ class PcBoard(QScrollArea):
         self.fixed_cols = 0      # 0 = 자동
         self._cols = 0
         self.current: int | None = None
+        self.nav = _BoardNav(self)
 
     # ------------------------------------------------------------ 배치
     def cols(self) -> int:

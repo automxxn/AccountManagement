@@ -746,6 +746,7 @@ class AgentsTab(QWidget):
         self.board = PcBoard(self)
         self.legend = QLabel()
         self.legend.setTextFormat(Qt.RichText)
+        self.legend.setWordWrap(True)   # 좁은 창에서 창 폭을 늘리지 않게
         board_page = QWidget()
         bpl = QVBoxLayout(board_page)
         bpl.setContentsMargins(0, 0, 0, 0)
@@ -1055,7 +1056,7 @@ class AgentsTab(QWidget):
         self.legend.setText("&nbsp;&nbsp;&nbsp;".join([
             dot("success", "●", "켜짐", "on"), dot("accent_text", "●", "작업 중", "busy"),
             dot("danger", "●", "꺼짐", "off"), dot("faint", "○", "실행기 없음", "none"),
-        ]) + f"&nbsp;&nbsp;&nbsp;<span style='color:{T('muted')}'>· 카드를 누르면 체크(명령 대상) + 아래에 명령 기록</span>")
+        ]) + f"&nbsp;&nbsp;&nbsp;<span style='color:{T('muted')}'>· 카드 누르기 = 체크(명령 대상) + 아래에 명령 기록 · 휠 = 위아래, Shift+휠 = 좌우, 휠 버튼 누른 채 끌기 = 상하좌우</span>")
 
     def _check_all(self, on: bool) -> None:
         self.checked = {p.id for p in self.pcs} if on else set()
